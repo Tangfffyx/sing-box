@@ -50,4 +50,4 @@
 通过 SSH 登录到您的服务器，执行以下命令一键下载并启动管理菜单：
 
 ```bash
-bash <(curl -Ls [https://raw.githubusercontent.com/Tangfffyx/Public/main/Script/sing-box.sh](https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh))
+bash <(curl -Ls https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh)
