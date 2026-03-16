@@ -54,8 +54,11 @@ jobs:
           cd sing-box-src
 
           default_tags=$(tr '\n' ',' < release/DEFAULT_BUILD_TAGS | sed 's/,$//')
-          # 删除会导致 Linux 编译报错的 naive tag，再追加 with_v2ray_api
+
+          # 删除 Linux 下容易导致编译失败的 naive tag
           final_tags=$(printf '%s\n' "$default_tags" | tr ',' '\n' | grep -v '^with_naive_outbound$' | awk 'NF && !seen[$0]++' | paste -sd',' -)
+
+          # 追加 v2ray api
           final_tags="${final_tags},with_v2ray_api"
 
           ldflags=$(tr '\n' ' ' < release/LDFLAGS | sed 's/  */ /g')
@@ -88,23 +91,54 @@ jobs:
             -o ../dist/linux-arm64/sing-box \
             ./cmd/sing-box
 
+      - name: Build linux armv7
+        run: |
+          cd sing-box-src
+          mkdir -p ../dist/linux-armv7
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
+          go build -trimpath \
+            -ldflags "${{ steps.meta.outputs.ldflags }}" \
+            -tags "${{ steps.meta.outputs.tags }}" \
+            -o ../dist/linux-armv7/sing-box \
+            ./cmd/sing-box
+
+      - name: Build linux 386
+        run: |
+          cd sing-box-src
+          mkdir -p ../dist/linux-386
+          CGO_ENABLED=0 GOOS=linux GOARCH=386 \
+          go build -trimpath \
+            -ldflags "${{ steps.meta.outputs.ldflags }}" \
+            -tags "${{ steps.meta.outputs.tags }}" \
+            -o ../dist/linux-386/sing-box \
+            ./cmd/sing-box
+
       - name: Verify amd64 build tags
         run: |
           chmod +x dist/linux-amd64/sing-box
           dist/linux-amd64/sing-box version
           dist/linux-amd64/sing-box version | grep with_v2ray_api
 
-      - name: Verify arm64 binary exists
+      - name: Verify all binaries exist
         run: |
+          test -f dist/linux-amd64/sing-box
           test -f dist/linux-arm64/sing-box
+          test -f dist/linux-armv7/sing-box
+          test -f dist/linux-386/sing-box
 
       - name: Package tar.gz
         run: |
           mkdir -p release-files
           tar -C dist/linux-amd64 -czf release-files/sing-box-linux-amd64.tar.gz sing-box
           tar -C dist/linux-arm64 -czf release-files/sing-box-linux-arm64.tar.gz sing-box
+          tar -C dist/linux-armv7 -czf release-files/sing-box-linux-armv7.tar.gz sing-box
+          tar -C dist/linux-386 -czf release-files/sing-box-linux-386.tar.gz sing-box
+
           cp dist/linux-amd64/sing-box release-files/sing-box-linux-amd64
           cp dist/linux-arm64/sing-box release-files/sing-box-linux-arm64
+          cp dist/linux-armv7/sing-box release-files/sing-box-linux-armv7
+          cp dist/linux-386/sing-box release-files/sing-box-linux-386
+
           sha256sum release-files/* > release-files/sha256sum.txt
 
       - name: Delete existing tag release if needed
@@ -122,6 +156,10 @@ jobs:
           files: |
             release-files/sing-box-linux-amd64
             release-files/sing-box-linux-arm64
+            release-files/sing-box-linux-armv7
+            release-files/sing-box-linux-386
             release-files/sing-box-linux-amd64.tar.gz
             release-files/sing-box-linux-arm64.tar.gz
+            release-files/sing-box-linux-armv7.tar.gz
+            release-files/sing-box-linux-386.tar.gz
             release-files/sha256sum.txt
