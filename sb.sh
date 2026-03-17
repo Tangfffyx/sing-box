@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.5.6"
+SCRIPT_VERSION="3.5.7"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 
@@ -2368,10 +2368,12 @@ user_manage_package_menu() {
   fi
 
   echo "$db_json" | jq --arg u "$username" --arg mode "$mode_val" --argjson quota "$quota_val" --argjson reset "$reset_val" --arg exp "$expire_val" '
-    .users[$u].traffic_mode = $mode
+    (.users[$u].reset_day // 0) as $old_reset
+    | .users[$u].traffic_mode = $mode
     | .users[$u].quota_gb = $quota
     | .users[$u].reset_day = $reset
     | .users[$u].expire_at = $exp
+    | if ($old_reset != $reset) then .users[$u].last_reset_period = "" else . end
   '
 }
 
