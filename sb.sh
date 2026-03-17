@@ -23,7 +23,7 @@ TEMP_FILE="/etc/sing-box/config.json.tmp"
 SCRIPT_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
 SB_TARGET_SCRIPT="/root/sing-box.sh"
 SB_SHORTCUT="/usr/local/bin/sb"
-REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/Public/main/Script/sing-box.sh"
+REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh"
 SINGBOX_RELEASE_REPO="Tangfffyx/sing-box"
 SINGBOX_INSTALL_DIR="/usr/local/bin"
 SINGBOX_BIN="${SINGBOX_INSTALL_DIR}/sing-box"
@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.5.5"
+SCRIPT_VERSION="3.5.6"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 
@@ -2945,6 +2945,34 @@ show_versions() {
   echo -e "${W}--------------------------${NC}"
 }
 
+
+script_version_of_file() {
+  local f="${1:-}"
+  [ -f "$f" ] || return 1
+  grep -E '^[[:space:]]*SCRIPT_VERSION=' "$f" 2>/dev/null | head -n1 | sed -E 's/^[^"]*"([^"]+)".*$/\1/'
+}
+
+sync_runtime_script_entrypoints() {
+  local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
+  local resolved current_ver target_ver
+  resolved="$(readlink -f "$current" 2>/dev/null || echo "$current")"
+  current_ver="${SCRIPT_VERSION:-}"
+  target_ver="$(script_version_of_file "$SB_TARGET_SCRIPT" || true)"
+
+  if [[ "$resolved" == /dev/fd/* ]] || [[ "$resolved" == /proc/self/fd/* ]] || [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]]; then
+    if [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; then
+      curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
+    fi
+  else
+    if [ "$resolved" != "$SB_TARGET_SCRIPT" ] && { [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; }; then
+      cp -f "$resolved" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  chmod +x "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
+  install_sb_shortcut >/dev/null 2>&1 || true
+}
+
 install_script_self() {
   mkdir -p /usr/local/bin
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
@@ -3838,6 +3866,8 @@ main_menu() {
     esac
   done
 }
+
+sync_runtime_script_entrypoints
 
 if [[ "${1:-}" == "--user-watch" ]]; then
   user_watch_run
