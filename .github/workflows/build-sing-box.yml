@@ -3,7 +3,8 @@ name: Build sing-box with v2ray api
 on:
   workflow_dispatch:
   schedule:
-    - cron: "20 3 * * *"
+    # 每周一 03:20 UTC
+    - cron: "20 3 * * 1"
 
 permissions:
   contents: write
@@ -23,6 +24,7 @@ jobs:
         run: |
           latest_tag=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
           echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "version=${latest_tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Get current release in this repo
         id: current
@@ -36,17 +38,20 @@ jobs:
           echo "Already latest: ${{ steps.latest.outputs.tag }}"
           exit 0
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-
       - name: Checkout sing-box source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: SagerNet/sing-box
           ref: ${{ steps.latest.outputs.tag }}
           path: sing-box-src
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+          cache-dependency-path: sing-box-src/go.sum
 
       - name: Prepare build tags and ldflags
         id: meta
@@ -61,13 +66,17 @@ jobs:
           # 追加 v2ray api
           final_tags="${final_tags},with_v2ray_api"
 
-          ldflags=$(tr '\n' ' ' < release/LDFLAGS | sed 's/  */ /g')
+          # 原项目 ldflags
+          base_ldflags=$(tr '\n' ' ' < release/LDFLAGS | sed 's/  */ /g')
+
+          # 显式写入版本号，避免 sing-box version 显示 unknown
+          final_ldflags="-X 'github.com/sagernet/sing-box/constant.Version=${{ steps.latest.outputs.version }}' ${base_ldflags}"
 
           echo "tags=$final_tags" >> "$GITHUB_OUTPUT"
-          echo "ldflags=$ldflags" >> "$GITHUB_OUTPUT"
+          echo "ldflags=$final_ldflags" >> "$GITHUB_OUTPUT"
 
           echo "Using tags: $final_tags"
-          echo "Using ldflags: $ldflags"
+          echo "Using ldflags: $final_ldflags"
 
       - name: Build linux amd64
         run: |
@@ -117,6 +126,7 @@ jobs:
         run: |
           chmod +x dist/linux-amd64/sing-box
           dist/linux-amd64/sing-box version
+          dist/linux-amd64/sing-box version | grep "${{ steps.latest.outputs.version }}"
           dist/linux-amd64/sing-box version | grep with_v2ray_api
 
       - name: Verify all binaries exist
@@ -148,18 +158,21 @@ jobs:
           tag="${{ steps.latest.outputs.tag }}"
           gh release delete "$tag" -R "${{ github.repository }}" -y --cleanup-tag || true
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.latest.outputs.tag }}
-          name: ${{ steps.latest.outputs.tag }}
-          files: |
-            release-files/sing-box-linux-amd64
-            release-files/sing-box-linux-arm64
-            release-files/sing-box-linux-armv7
-            release-files/sing-box-linux-386
-            release-files/sing-box-linux-amd64.tar.gz
-            release-files/sing-box-linux-arm64.tar.gz
-            release-files/sing-box-linux-armv7.tar.gz
-            release-files/sing-box-linux-386.tar.gz
-            release-files/sha256sum.txt
+      - name: Create release with gh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.latest.outputs.tag }}"
+          gh release create "$tag" \
+            release-files/sing-box-linux-amd64 \
+            release-files/sing-box-linux-arm64 \
+            release-files/sing-box-linux-armv7 \
+            release-files/sing-box-linux-386 \
+            release-files/sing-box-linux-amd64.tar.gz \
+            release-files/sing-box-linux-arm64.tar.gz \
+            release-files/sing-box-linux-armv7.tar.gz \
+            release-files/sing-box-linux-386.tar.gz \
+            release-files/sha256sum.txt \
+            --repo "${{ github.repository }}" \
+            --title "$tag" \
+            --notes "Auto-built sing-box with with_v2ray_api"
