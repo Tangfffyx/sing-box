@@ -14,7 +14,7 @@ set -Eeuo pipefail
 
 # ====================================================
 # Project : Sing-box Elite Management System
-# Version : 3.4.9
+# Version : 3.5.9
 # Notes   : Single-file refactor, managed-route rebuild, no legacy compatibility.
 # ====================================================
 
@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.5.7"
+SCRIPT_VERSION="3.5.12"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 
@@ -2412,12 +2412,19 @@ user_manage_single() {
     echo -e "${B}--------------------------------------------------------${NC}"
     echo "当前用户：$username"
     if [ "$username" = "admin" ]; then
-      echo "admin 为系统默认用户，不可编辑、不可删除。"
-      echo "  1. 查看用户信息"
+      echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
+      echo "  1. 套餐设置"
+      echo "  2. 查看用户信息"
       echo "  0. 返回"
       read -r -p "请选择操作: " act
       case "${act:-}" in
-        1) clear; print_rect_title "用户信息"; user_show_info "$db_json" "$username"; echo ""; pause ;;
+        1)
+          new_db="$(user_manage_package_menu "$db_json" "$username")" || new_db=""
+          if json_is_object "$new_db"; then
+            user_manager_apply_changes "$new_db" "$json" || true
+          fi
+          ;;
+        2) clear; print_rect_title "用户信息"; user_show_info "$db_json" "$username"; echo ""; pause ;;
         0|q|Q|"") return 0 ;;
         *) warn "无效输入：$act"; sleep 1 ;;
       esac
@@ -3079,13 +3086,23 @@ migrate_legacy_user_db_if_needed() {
   fi
 }
 
-takeover_existing_installation() {
-  say "接管现有 sing-box 安装环境..."
+
+
+is_script_managed_environment() {
+  [ -f /etc/systemd/system/sing-box.service ] || return 1
+  grep -Fq "ExecStart=${SINGBOX_BIN} -D /var/lib/sing-box -c /etc/sing-box/config.json run" /etc/systemd/system/sing-box.service 2>/dev/null || return 1
+  [ -f /usr/local/bin/sb ] && grep -Fq 'exec bash /root/sing-box.sh "$@"' /usr/local/bin/sb 2>/dev/null || return 1
+  return 0
+}
+
+
+prepare_script_runtime() {
+  say "准备脚本运行环境..."
   migrate_legacy_user_db_if_needed
   write_managed_singbox_service
   ensure_command_compat_links
   systemctl daemon-reload
-  ok "已切换为脚本托管的 sing-box.service。"
+  ok "脚本运行环境已就绪。"
 }
 
 install_or_update_singbox() {
@@ -3095,6 +3112,8 @@ install_or_update_singbox() {
   echo -e "${B}+----------------------------------------------+${NC}"
 
   ensure_deps_for_installer
+
+  ui_echo "[INFO] 如当前机器上已存在非本脚本安装的 sing-box，建议先执行“卸载 sing-box”后再安装。"
 
   sync_user_usage_counters || true
 
@@ -3152,7 +3171,6 @@ install_or_update_singbox() {
     return 1
   fi
 
-  
   say "下载校验文件..."
   if curl -fL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
@@ -3206,7 +3224,9 @@ install_or_update_singbox() {
   say "准备流量统计依赖..."
   ensure_grpcurl_logged || true
   ensure_v2ray_api_proto_files || true
-  takeover_existing_installation
+
+  # 纯安装/纯更新：准备脚本运行环境
+  prepare_script_runtime
   config_ensure_exists
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
@@ -3263,9 +3283,9 @@ uninstall_singbox_keep_config() {
     pkg_installed sing-box-beta && apt-get remove -y sing-box-beta || true
     pkg_installed sing-box && apt-get purge -y sing-box || true
     pkg_installed sing-box-beta && apt-get purge -y sing-box-beta || true
-    ok "已清理脚本接管层并卸载官方包残留。"
+    ok "已清理脚本运行层并卸载官方包残留（如存在）。"
   else
-    ok "已清理脚本接管层。"
+    ok "已清理脚本运行层（如存在）。"
   fi
   [ -d /etc/sing-box ] && ok "配置目录仍存在：/etc/sing-box" || warn "未找到 /etc/sing-box"
   [ -d "$(dirname "$USER_DB_FILE")" ] && ok "用户数据库目录仍存在：$(dirname "$USER_DB_FILE")" || true
