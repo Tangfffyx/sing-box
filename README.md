@@ -35,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/head
 
 ### 4. 导出节点配置
 自动生成客户端订阅与配置信息：
-* 支持一键导出 Clash、Quantumult X (QX)、Surge 格式的节点配置。
+* 支持一键导出 Clash、Quantumult X、Surge 格式的节点配置。
 
 ---
 
