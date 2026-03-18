@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.5.12"
+SCRIPT_VERSION="3.5.16"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 
@@ -3113,11 +3113,9 @@ install_or_update_singbox() {
 
   ensure_deps_for_installer
 
-  ui_echo "[INFO] 如当前机器上已存在非本脚本安装的 sing-box，建议先执行“卸载 sing-box”后再安装。"
-
   sync_user_usage_counters || true
 
-  local arch file tag latest_ver inst ans tmp_dir base_url download_url sha_url
+  local arch file tag latest_ver inst ans tmp_dir base_url download_url sha_url managed_env
   arch="$(uname -m)"
   case "$arch" in
     x86_64) file="sing-box-linux-amd64.tar.gz" ;;
@@ -3133,7 +3131,13 @@ install_or_update_singbox() {
 
   tag="$(get_release_latest_tag)"
   latest_ver="$(normalize_release_tag "$tag")"
-  inst="$(get_installed_version)"
+
+  managed_env="0"
+  inst=""
+  if is_script_managed_environment; then
+    managed_env="1"
+    inst="$(get_installed_version)"
+  fi
 
   if [ -z "${latest_ver:-}" ]; then
     err "未获取到 GitHub Release 最新版本。"
@@ -3141,21 +3145,32 @@ install_or_update_singbox() {
     return 1
   fi
 
-  if [ -z "${inst:-}" ]; then
-    echo -e "当前状态：${Y}未安装 sing-box${NC}"
-    echo -e "将安装版本：${G}${latest_ver}${NC}"
-  else
-    echo -e "当前版本：${G}${inst}${NC}"
+  if [ "${managed_env}" != "1" ] && command -v sing-box >/dev/null 2>&1; then
+    ui_echo "[WARN] 检测到已有非本脚本安装的 sing-box 环境，请先执行“卸载 sing-box”后再安装。"
+    pause >&2
+    return 0
+  fi
+
+  if [ "${managed_env}" = "1" ]; then
+    echo -e "当前版本：${G}${inst:-未知}${NC}"
     echo -e "最新版本：${G}${latest_ver}${NC}"
-    if ! dpkg --compare-versions "$inst" lt "$latest_ver"; then
+    if [ -n "${inst:-}" ] && ! dpkg --compare-versions "$inst" lt "$latest_ver"; then
       ok "当前已是最新版本。"
       pause
       return 0
     fi
-    read -r -p "检测到新版本，是否升级？[Y/n]: " ans
-    case "${ans:-Y}" in
-      n|N) warn "已取消升级。"; pause; return 0 ;;
-    esac
+    if [ -n "${inst:-}" ]; then
+      read -r -p "检测到新版本，是否升级？[Y/n]: " ans
+      case "${ans:-Y}" in
+        [Nn]*) return 0 ;;
+      esac
+    else
+      echo -e "当前状态：${Y}本脚本环境，但未识别到已安装版本${NC}"
+      echo -e "将安装版本：${G}${latest_ver}${NC}"
+    fi
+  else
+    echo -e "当前状态：${Y}未安装 sing-box${NC}"
+    echo -e "将安装版本：${G}${latest_ver}${NC}"
   fi
 
   tmp_dir="$(mktemp -d)"
