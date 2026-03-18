@@ -9,7 +9,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/head
 ```
 **非root用户：**
 ```bash
-sudo bash <(curl -fsSL [https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh](https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh))
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh)
 ```
 
 * **快捷命令**：安装完成后，在终端输入 `sb` 即可唤出管理菜单。
