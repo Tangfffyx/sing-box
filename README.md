@@ -7,6 +7,10 @@
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh)
 ```
+**非root用户：**
+```bash
+sudo bash <(curl -fsSL [https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh](https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh))
+```
 
 * **快捷命令**：安装完成后，在终端输入 `sb` 即可唤出管理菜单。
 * **避免冲突**：如果当前系统已安装官方版本的 sing-box，推荐先在菜单中执行“9. 卸载 sing-box”（保留配置），再执行“1. 安装/更新 sing-box”进行环境接管。
