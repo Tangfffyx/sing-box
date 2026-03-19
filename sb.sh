@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.5.16"
+SCRIPT_VERSION="3.5.18"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 
@@ -1809,53 +1809,91 @@ user_package_invalid_return() {
   ui_echo "${Y}[WARN]${NC} 输入无效，未作修改，已返回上一级。"
 }
 
+
+table_compute_widths() {
+  local sep="$1"
+  shift
+  local -a rows=("$@")
+  local -a widths=()
+  local row i w
+  local -a cols=()
+  for row in "${rows[@]}"; do
+    IFS="$sep" read -r -a cols <<< "$row"
+    for i in "${!cols[@]}"; do
+      w="$(text_display_width "${cols[$i]}")"
+      if [ -z "${widths[$i]:-}" ] || [ "$w" -gt "${widths[$i]}" ]; then
+        widths[$i]="$w"
+      fi
+    done
+  done
+  local -a out=()
+  for i in "${!widths[@]}"; do
+    out+=("$((widths[$i] + 2))")
+  done
+  printf '%s\n' "${out[*]}"
+}
+
+table_print_row() {
+  local widths_line="$1"
+  shift
+  local -a widths=()
+  local -a cells=("$@")
+  local i out=""
+  read -r -a widths <<< "$widths_line"
+  for i in "${!cells[@]}"; do
+    out+="$(pad_display_text "${cells[$i]}" "${widths[$i]}")"
+  done
+  printf '%s\n' "$out"
+}
+
 show_user_status_table() {
   local db_json="$1"
-  local w_user=18 w_status=6 w_up=14 w_down=14 w_pkg=16 w_reset=8
-  printf "%b" "$C"
-  pad_display_text "用户名" "$w_user"; printf " "
-  pad_display_text "状态" "$w_status"; printf " "
-  pad_display_text "上传流量" "$w_up"; printf " "
-  pad_display_text "下载流量" "$w_down"; printf " "
-  pad_display_text "套餐" "$w_pkg"; printf " "
-  pad_display_text "重置日" "$w_reset"; printf " 到期时间%b
-" "$NC"
-  printf '%s
-' "------------------------------------------------------------------------------------------------"
-  while IFS=$'	' read -r name enabled up down package reset expire; do
-    local status up_text down_text reset_text exp_text
-    status="关闭"
-    [ "$enabled" = "true" ] && status="开启"
-    up_text="$(format_traffic_auto "${up:-0}")"
-    down_text="$(format_traffic_auto "${down:-0}")"
-    reset_text="$(reset_day_text "$reset")"
-    exp_text="$(expire_text "$expire")"
-    pad_display_text "$name" "$w_user"; printf " "
-    pad_display_text "$status" "$w_status"; printf " "
-    pad_display_text "$up_text" "$w_up"; printf " "
-    pad_display_text "$down_text" "$w_down"; printf " "
-    pad_display_text "$package" "$w_pkg"; printf " "
-    pad_display_text "$reset_text" "$w_reset"; printf " %s
-" "$exp_text"
-  done < <(echo "$db_json" | jq -r '
-    .users
-    | to_entries[]
-    | [
-        .key,
-        (.value.enabled|tostring),
-        ((.value.used_up_bytes // 0)|tostring),
-        ((.value.used_down_bytes // 0)|tostring),
-        (
-          (if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end)
-          + "("
-          + (if (.value.traffic_mode // "down") == "both" then "双向" else "单向" end)
-          + ")"
-        ),
-        ((.value.reset_day // 0)|tostring),
-        (.value.expire_at // "0")
-      ]
-    | @tsv
-  ')
+  local sep=$'\t'
+  local header widths_line row_line
+  local -a rows=()
+  local -a cols=()
+
+  header="用户名${sep}状态${sep}上传流量${sep}下载流量${sep}套餐${sep}重置日${sep}到期时间"
+  rows+=("$header")
+
+  while IFS= read -r row_line; do
+    [ -n "$row_line" ] && rows+=("$row_line")
+  done < <(
+    echo "$db_json" | jq -r '
+      .users
+      | to_entries
+      | .[]
+      | [
+          .key,
+          (if (.value.enabled // true) then "开启" else "关闭" end),
+          ((.value.used_up_bytes // 0) | tostring),
+          ((.value.used_down_bytes // 0) | tostring),
+          (((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end) + "(" + (if (.value.traffic_mode // "down") == "both" then "双向" else "单向" end) + ")")),
+          (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 29 then "月底" else ((.value.reset_day|tostring) + "号") end),
+          (if (.value.expire_at // "0") == "0" then "永久" else (.value.expire_at // "0") end)
+        ] | @tsv
+    ' | while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6 c7; do
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$c1" \
+            "$c2" \
+            "$(format_bytes_human "$c3")" \
+            "$(format_bytes_human "$c4")" \
+            "$c5" \
+            "$c6" \
+            "$c7"
+      done
+  )
+
+  widths_line="$(table_compute_widths "$sep" "${rows[@]}")"
+
+  IFS="$sep" read -r -a cols <<< "$header"
+  table_print_row "$widths_line" "${cols[@]}"
+  printf '%s\n' "------------------------------------------------------------------------------------------------"
+
+  for row_line in "${rows[@]:1}"; do
+    IFS="$sep" read -r -a cols <<< "$row_line"
+    table_print_row "$widths_line" "${cols[@]}"
+  done
 }
 
 show_user_status_table_from_file() {
