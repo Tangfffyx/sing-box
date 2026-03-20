@@ -47,7 +47,9 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs
 ## 其他特色
 
 * **原生兼容性**：
-  采用官方 `with_v2ray_api` 编译版本，底层运行逻辑与官方原版完全一致。配置文件固定在 `/etc/sing-box/config.json`。支持直接使用 Linux 原生命令进行管理与排错（例如：`systemctl status sing-box` 或 `sing-box check -c /etc/sing-box/config.json`）。
+  采用官方 `with_v2ray_api` 编译版本，底层运行逻辑与官方原版完全一致。
+  配置文件固定在 `/etc/sing-box/config.json`。
+  支持直接使用 Linux 原生命令进行管理与排错（例如：`systemctl status sing-box` 或 `sing-box check -c /etc/sing-box/config.json`）。
   
 * **系统时间校准 (Chrony)**：
   系统工具中提供了一键安装并启用 `chrony` 服务的功能。**强烈推荐执行此项**，因为精准的系统时间是保障流量统计准确性以及 Shadowsocks2022 等防重放协议稳定运行的必要条件。
