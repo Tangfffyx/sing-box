@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.5.20"
+SCRIPT_VERSION="3.6.2"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 
@@ -1964,8 +1964,7 @@ user_manager_apply_to_json() {
     local username
     while IFS= read -r username; do
       [ -n "$username" ] || continue
-      [ "$username" = "admin" ] && continue
-      if user_db_user_allow_node "$db_json" "$username" "$entry_key"; then
+        if user_db_user_allow_node "$db_json" "$username" "$entry_key"; then
         desired_names+=("$(node_user_name "$entry_key" "$username")")
       fi
     done < <(user_db_all_users "$db_json")
@@ -1974,8 +1973,7 @@ user_manager_apply_to_json() {
       desired_names+=("$relay_node")
       while IFS= read -r username; do
         [ -n "$username" ] || continue
-        [ "$username" = "admin" ] && continue
-        if user_db_user_allow_node "$db_json" "$username" "$relay_node"; then
+            if user_db_user_allow_node "$db_json" "$username" "$relay_node"; then
           desired_names+=("$(node_user_name "$relay_node" "$username")")
         fi
       done < <(user_db_all_users "$db_json")
@@ -2021,7 +2019,7 @@ filter_disabled_auth_users() {
       end;
     def user_enabled($u):
       if ($u | contains("@")) then ($enabled | index(($u | split("@")[1]))) != null
-      else true
+      else ($enabled | index("admin")) != null
       end;
 
     .route.rules |= map(
@@ -2122,7 +2120,7 @@ prompt_reset_day() {
 
 prompt_expire_date() {
   local outvar="$1" val
-  read -r -p "请输入到期日期（YYYY-MM-DD，输入 0 表示永久）: " val
+  read -r -p "请输入到期日期（格式：YYYY-MM-DD，输入 0 表示永久）: " val
   if [ "$val" = "0" ]; then
     printf -v "$outvar" '%s' '0'
     return 0
@@ -2394,7 +2392,7 @@ user_manage_package_menu() {
   fi
 
   ui_echo "当前到期时间：$(expire_text "$current_expire")"
-  ui_echo "输入 0 表示永久"
+  ui_echo "请输入到期日期（格式：YYYY-MM-DD，输入 0 表示永久）:"
   ui_echo "回车：保持当前值"
   read -r -p "请输入: " expire_in
   if [ -z "$expire_in" ]; then
@@ -2405,6 +2403,12 @@ user_manage_package_menu() {
     expire_val="$expire_in"
   else
     user_package_invalid_return; pause >&2; return 1
+  fi
+
+  if [ "$mode_val" = "$current_mode" ]     && [ "$quota_val" = "$current_quota" ]     && [ "$reset_val" = "$current_reset" ]     && [ "$expire_val" = "$current_expire" ]; then
+    ui_echo "[INFO] 未检测到改动，按任意键返回。"
+    pause >&2
+    return 1
   fi
 
   echo "$db_json" | jq --arg u "$username" --arg mode "$mode_val" --argjson quota "$quota_val" --argjson reset "$reset_val" --arg exp "$expire_val" '
@@ -2453,18 +2457,27 @@ user_manage_single() {
     echo "当前用户：$username"
     if [ "$username" = "admin" ]; then
       echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
-      echo "  1. 套餐设置"
-      echo "  2. 查看用户信息"
+      echo "  1. 启用/停用"
+      echo "  2. 套餐设置"
+      echo "  3. 查看用户信息"
       echo "  0. 返回"
       read -r -p "请选择操作: " act
       case "${act:-}" in
         1)
+          if user_db_user_is_enabled "$db_json" "$username"; then
+            new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false')"
+          else
+            new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true')"
+          fi
+          user_manager_apply_changes "$new_db" "$json" || true
+          ;;
+        2)
           new_db="$(user_manage_package_menu "$db_json" "$username")" || new_db=""
           if json_is_object "$new_db"; then
             user_manager_apply_changes "$new_db" "$json" || true
           fi
           ;;
-        2) clear; print_rect_title "用户信息"; user_show_info "$db_json" "$username"; echo ""; pause ;;
+        3) clear; print_rect_title "用户信息"; user_show_info "$db_json" "$username"; echo ""; pause ;;
         0|q|Q|"") return 0 ;;
         *) warn "无效输入：$act"; sleep 1 ;;
       esac
@@ -2647,7 +2660,6 @@ apply_automatic_user_controls() {
   local username expire_at reset_day last_reset enabled quota billable hit_reset last_day
   while IFS= read -r username; do
     [ -n "$username" ] || continue
-    [ "$username" = "admin" ] && continue
 
     expire_at="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"
     reset_day="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].reset_day // 0')"
