@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.6.2"
+SCRIPT_VERSION="3.6.3"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 
@@ -2801,10 +2801,13 @@ export_configs() {
 
   echo -e "${C}--- 节点配置导出 ---${NC}"
 
-  local direct_tmp relay_tmp user_dir
+  local direct_tmp relay_tmp user_dir seen_direct_dir seen_relay_dir seen_user_dir
   direct_tmp="$(mktemp)"
   relay_tmp="$(mktemp)"
   user_dir="$(mktemp -d)"
+  seen_direct_dir="$(mktemp -d)"
+  seen_relay_dir="$(mktemp -d)"
+  seen_user_dir="$(mktemp -d)"
 
   while read -r inbound; do
     local tag type port sni path sid method server_p proto
@@ -2827,16 +2830,29 @@ export_configs() {
       [ -z "$name" ] && continue
       out_name="$name"
 
+      local dedupe_scope dedupe_key dedupe_file
       if [[ "$name" == *"@"* ]]; then
         business_user="$(user_business_name "$name")"
         safe_user="$(printf '%s' "$business_user" | tr '/ ' '__')"
         target_file="${user_dir}/${safe_user}.tmp"
+        dedupe_scope="${safe_user}"
       elif printf '%s
 ' "$relay_users_nl" | grep -Fxq "$name"; then
         target_file="$relay_tmp"
+        dedupe_scope="relay"
       else
         target_file="$direct_tmp"
+        dedupe_scope="direct"
       fi
+
+      dedupe_key="$(printf '%s' "$out_name" | tr '/ ' '__')"
+      case "$dedupe_scope" in
+        direct) dedupe_file="${seen_direct_dir}/${dedupe_key}" ;;
+        relay) dedupe_file="${seen_relay_dir}/${dedupe_key}" ;;
+        *) dedupe_file="${seen_user_dir}/${dedupe_scope}__${dedupe_key}" ;;
+      esac
+      [ -e "$dedupe_file" ] && continue
+      : > "$dedupe_file"
 
       case "$proto" in
         vless-reality)
@@ -2942,7 +2958,7 @@ ${C}用户节点${NC}"
     echo -e "  ${Y}当前没有用户节点。${NC}"
   fi
 
-  rm -rf "$user_dir" >/dev/null 2>&1 || true
+  rm -rf "$user_dir" "$seen_direct_dir" "$seen_relay_dir" "$seen_user_dir" >/dev/null 2>&1 || true
   rm -f "$direct_tmp" "$relay_tmp" >/dev/null 2>&1 || true
   echo ""
   pause
