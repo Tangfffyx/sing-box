@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.6.5"
+SCRIPT_VERSION="3.6.6"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 
@@ -1960,10 +1960,11 @@ user_manager_apply_to_json() {
       fi
     done | sort -u)
 
-    local desired_names=()
+    local desired_names=("$entry_key")
     local username
     while IFS= read -r username; do
       [ -n "$username" ] || continue
+      [ "$username" = "admin" ] && continue
       if user_db_user_allow_node "$db_json" "$username" "$entry_key"; then
         desired_names+=("$(node_user_name "$entry_key" "$username")")
       fi
@@ -1973,7 +1974,8 @@ user_manager_apply_to_json() {
       desired_names+=("$relay_node")
       while IFS= read -r username; do
         [ -n "$username" ] || continue
-            if user_db_user_allow_node "$db_json" "$username" "$relay_node"; then
+        [ "$username" = "admin" ] && continue
+        if user_db_user_allow_node "$db_json" "$username" "$relay_node"; then
           desired_names+=("$(node_user_name "$relay_node" "$username")")
         fi
       done < <(user_db_all_users "$db_json")
