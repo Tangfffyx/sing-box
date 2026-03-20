@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.5.18"
+SCRIPT_VERSION="3.5.20"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 
@@ -1865,7 +1865,7 @@ show_user_status_table() {
       | .[]
       | [
           .key,
-          (if (.value.enabled // true) then "开启" else "关闭" end),
+          (if (.value.enabled == true) then "开启" else "关闭" end),
           ((.value.used_up_bytes // 0) | tostring),
           ((.value.used_down_bytes // 0) | tostring),
           (((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end) + "(" + (if (.value.traffic_mode // "down") == "both" then "双向" else "单向" end) + ")")),
@@ -1887,7 +1887,9 @@ show_user_status_table() {
   widths_line="$(table_compute_widths "$sep" "${rows[@]}")"
 
   IFS="$sep" read -r -a cols <<< "$header"
-  table_print_row "$widths_line" "${cols[@]}"
+  local header_line
+  header_line="$(table_print_row "$widths_line" "${cols[@]}")"
+  ui_echo "${B}${header_line}${NC}"
   printf '%s\n' "------------------------------------------------------------------------------------------------"
 
   for row_line in "${rows[@]:1}"; do
@@ -2730,6 +2732,7 @@ user_manager_menu() {
     db_json="$(user_db_load)"
     clear
     print_rect_title "用户管理"
+    db_json="$(user_db_load)"
     show_user_status_table "$db_json"
     echo -e "${B}--------------------------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 新增用户"
