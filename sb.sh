@@ -21,7 +21,7 @@ CONFIG_FILE="/etc/sing-box/config.json"
 TEMP_FILE="/etc/sing-box/config.json.tmp"
 SCRIPT_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
 SB_TARGET_SCRIPT="/root/sing-box.sh"
-SB_SHORTCUT="/usr/local/bin/dsb"
+SB_SHORTCUT="/usr/local/bin/s"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh"
 SINGBOX_RELEASE_REPO="Tangfffyx/sing-box"
 SINGBOX_INSTALL_DIR="/usr/local/bin"
@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.8.5"
+SCRIPT_VERSION="3.9.2"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -1472,31 +1472,36 @@ generate_reality_keypair_auto() {
 
 get_tls_domain_candidates() {
   cat <<'EOF_TLS'
-www.apple.com
-res.public.onecdn.static.microsoft
-www.oracle.com
-c.s-microsoft.com
-static.cloud.coveo.com
-store-images.s-microsoft.com
-tag-logger.demandbase.com
-www.xbox.com
-snap.licdn.com
-se-edge.itunes.apple.com
-downloadmirror.intel.com
-www.amd.com
-consent.trustarc.com
-amp-api-edge.apps.apple.com
-gray-config-prod.api.cdn.arcpublishing.com
-electronics.sony.com
-www.xilinx.com
-services.digitaleast.mobi
-apps.apple.com
+assets.adobedtm.com
 lpcdn.lpsnmedia.net
-a.b.cdn.console.awsstatic.com
-acctcdn.msftauth.net
-b.6sc.co
-tags.tiqcdn.com
-gray-wowt-prod.gtv-cdn.com
+s.go-mpulse.net
+d0.m.awsstatic.com
+a0.awsstatic.com
+devblogs.microsoft.com
+ds-aksb-a.akamaihd.net
+tag.demandbase.com
+electronics.sony.com
+tag-logger.demandbase.com
+d3agakyjgjv5i8.cloudfront.net
+ms-python.gallerycdn.vsassets.io
+img-prod-cms-rt-microsoft-com.akamaized.net
+cdn.bizible.com
+store-images.s-microsoft.com
+catalog.gamepass.com
+www.nvidia.com
+mscom.demdex.net
+drivers.amd.com
+azure.microsoft.com
+downloadmirror.intel.com
+prod.us-east-1.ui.gcr-chat.marketing.aws.dev
+r.bing.com
+www.intel.com
+ms-vscode.gallerycdn.vsassets.io
+rum.hlx.page
+www.tesla.com
+ts2.tc.mm.bing.net
+res-1.cdn.office.net
+cdn-dynmedia-1.microsoft.com
 EOF_TLS
 }
 
@@ -1528,39 +1533,45 @@ auto_pick_tls_domain() {
 }
 
 choose_tls_domain() {
-  local proto_label="$1" default_domain="$2" choice manual picked picked_ms
+  local proto_label="$1" choice manual picked picked_ms
   ui_echo "1. 手动输入"
   ui_echo "2. 自动测速选择推荐域名"
-  ui_echo "回车：默认选择 2"
-  read -r -p "请选择域名填写方式: " choice
+  read -r -p "请选择域名填写方式（回车默认2. 自动测速选择推荐域名）: " choice
   case "${choice:-2}" in
     1)
-      read -r -p "请输入${proto_label}域名（回车默认: ${default_domain}）: " manual
-      echo "${manual:-$default_domain}"
+      read -r -p "请输入${proto_label}域名: " manual
+      if [ -z "${manual:-}" ]; then
+        warn "[WARN] 输入无效，已返回上一级。" >&2
+        pause >&2
+        return 1
+      fi
+      echo "$manual"
       ;;
     2)
       picked="$(auto_pick_tls_domain 2>/dev/null || true)"
       if [ -n "$picked" ]; then
-        picked_ms="${picked#*$'	'}"
-        picked="${picked%%$'	'*}"
+        picked_ms="${picked#*$'\t'}"
+        picked="${picked%%$'\t'*}"
         echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
         echo "$picked"
       else
-        warn "自动测速失败，已回退为手动输入。" >&2
-        read -r -p "请输入${proto_label}域名（回车默认: ${default_domain}）: " manual
-        echo "${manual:-$default_domain}"
+        warn "自动测速失败，已返回上一级。" >&2
+        pause >&2
+        return 1
       fi
       ;;
     *)
       warn "输入无效，已使用默认自动测速。" >&2
       picked="$(auto_pick_tls_domain 2>/dev/null || true)"
       if [ -n "$picked" ]; then
-        picked_ms="${picked#*$'	'}"
-        picked="${picked%%$'	'*}"
+        picked_ms="${picked#*$'\t'}"
+        picked="${picked%%$'\t'*}"
         echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
         echo "$picked"
       else
-        echo "$default_domain"
+        warn "自动测速失败，已返回上一级。" >&2
+        pause >&2
+        return 1
       fi
       ;;
   esac
@@ -3138,14 +3149,14 @@ install_script_self() {
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
   if [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]] || [[ "$current" == /dev/fd/* ]] || [[ "$current" == /proc/self/fd/* ]]; then
     curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" || {
-      warn "快捷命令 dsb 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
+      warn "快捷命令 s 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
       return 1
     }
   else
     current="$(readlink -f "$current" 2>/dev/null || echo "$current")"
     if [ "$current" != "$SB_TARGET_SCRIPT" ]; then
       cp -f "$current" "$SB_TARGET_SCRIPT" || {
-        warn "快捷命令 dsb 安装失败：无法复制脚本到 $SB_TARGET_SCRIPT"
+        warn "快捷命令 s 安装失败：无法复制脚本到 $SB_TARGET_SCRIPT"
         return 1
       }
     fi
@@ -3164,7 +3175,7 @@ EOF2
 ensure_sb_shortcut() {
   install_script_self || return 1
   install_sb_shortcut
-  ok "已创建脚本快捷键：dsb"
+  ok "已创建脚本快捷键：s"
 }
 
 
@@ -3301,7 +3312,7 @@ migrate_legacy_user_db_if_needed() {
 is_script_managed_environment() {
   [ -f /etc/systemd/system/sing-box.service ] || return 1
   grep -Fq "ExecStart=${SINGBOX_BIN} -D /var/lib/sing-box -c /etc/sing-box/config.json run" /etc/systemd/system/sing-box.service 2>/dev/null || return 1
-  [ -f /usr/local/bin/dsb ] && grep -Fq 'exec bash /root/sing-box.sh "$@"' /usr/local/bin/dsb 2>/dev/null || return 1
+  [ -f /usr/local/bin/s ] && grep -Fq 'exec bash /root/sing-box.sh "$@"' /usr/local/bin/s 2>/dev/null || return 1
   return 0
 }
 
@@ -3806,8 +3817,7 @@ protocol_install_menu() {
 ' | cut -c1-8)"; fi
           echo "已生成 Short ID: $sid"
         fi
-        sni="$(choose_tls_domain "Reality" "www.icloud.com")"
-        [ -n "$sni" ] || sni="www.icloud.com"
+        sni="$(choose_tls_domain "Reality")" || return 0
         inbound="$(build_vless_reality_inbound "$port" "$sni" "$priv" "$sid")"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
@@ -3824,8 +3834,7 @@ protocol_install_menu() {
           ask_port_or_return "AnyTLS 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
           entry_key="$(entry_key_from_parts anytls "$port")"
         done
-        sni="$(choose_tls_domain "AnyTLS" "www.icloud.com")"
-        [ -n "$sni" ] || sni="www.icloud.com"
+        sni="$(choose_tls_domain "AnyTLS")" || return 0
         inbound="$(build_anytls_inbound "$port" "$sni")"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
@@ -3878,8 +3887,7 @@ protocol_install_menu() {
           ask_port_or_return "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" port || { warn "已返回上一级。"; pause; return 0; }
           entry_key="$(entry_key_from_parts tuic "$port")"
         done
-        sni="$(choose_tls_domain "TUIC" "www.icloud.com")"
-        [ -n "$sni" ] || sni="www.icloud.com"
+        sni="$(choose_tls_domain "TUIC")" || return 0
         inbound="$(build_tuic_inbound "$port" "$sni")"
         updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
         added_node_keys+=("$entry_key")
