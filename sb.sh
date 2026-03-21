@@ -14,7 +14,6 @@ set -Eeuo pipefail
 
 # ====================================================
 # Project : Sing-box Elite Management System
-# Version : 3.5.9
 # Notes   : Single-file refactor, managed-route rebuild, no legacy compatibility.
 # ====================================================
 
@@ -32,12 +31,12 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.7.3"
+SCRIPT_VERSION="3.8.5"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
 LOG_MAINTAIN_CRON_SCHEDULE="0 4 * * *"
-SCRIPT_LOG_FILE="/var/log/sing-box-manager.log"
+SCRIPT_LOG_FILE="/var/log/sing-box/access.log"
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
 
 # ---------- UI ----------
@@ -227,7 +226,7 @@ ask_port_or_return() {
 config_min_template() {
   cat <<'JSON'
 {
-  "log": {"level": "warn", "timestamp": true},
+  "log": {"level": "info", "output": "/var/log/sing-box/access.log", "timestamp": true},
   "inbounds": [],
   "outbounds": [
     {"type": "direct", "tag": "direct"},
@@ -247,7 +246,7 @@ config_normalize() {
   echo "$json" | jq '
     if type != "object" then
       {
-        "log": {"level":"warn","timestamp":true},
+        "log": {"level":"info","output":"/var/log/sing-box/access.log","timestamp":true},
         "inbounds": [],
         "outbounds": [
           {"type":"direct","tag":"direct"},
@@ -256,7 +255,7 @@ config_normalize() {
         "route": {"rules": [], "final": "reject"}
       }
     else . end
-    | .log = (.log // {"level":"warn","timestamp":true})
+    | .log = (.log // {"level":"info","output":"/var/log/sing-box/access.log","timestamp":true})
     | .inbounds = (.inbounds // [])
     | .outbounds = (.outbounds // [])
     | .route = (.route // {"rules": [], "final": "reject"})
@@ -1891,15 +1890,20 @@ show_user_status_table() {
   widths_line="$(table_compute_widths "$sep" "${rows[@]}")"
 
   IFS="$sep" read -r -a cols <<< "$header"
-  local header_line
+  local header_line divider_line divider_width
   header_line="$(table_print_row "$widths_line" "${cols[@]}")"
-  ui_echo "${B}${header_line}${NC}"
-  printf '%s\n' "------------------------------------------------------------------------------------------------"
+  divider_width="$(text_display_width "$header_line")"
+  divider_line="$(printf '%*s' "$divider_width" '' | tr ' ' '-')"
+
+  ui_echo "\033[1m${header_line}${NC}"
+  ui_echo "${B}${divider_line}${NC}"
 
   for row_line in "${rows[@]:1}"; do
     IFS="$sep" read -r -a cols <<< "$row_line"
     table_print_row "$widths_line" "${cols[@]}"
   done
+
+  ui_echo "${B}${divider_line}${NC}"
 }
 
 show_user_status_table_from_file() {
@@ -2217,7 +2221,6 @@ user_add_menu() {
   clear
   print_rect_title "新增用户"
   show_user_status_table "$db_json"
-  echo -e "${B}--------------------------------------------------------${NC}"
   read -r -p "请输入用户名: " username
   if ! is_valid_user_name "$username"; then
     warn "用户名仅允许字母、数字、点、下划线、短横线。"
@@ -2278,7 +2281,6 @@ user_manage_permission_menu() {
   clear >&2
   print_rect_title "节点权限" >&2
   show_user_status_table "$db_json" >&2
-  ui_echo "${B}--------------------------------------------------------${NC}"
   current_allow_all="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].allow_all_nodes // false')"
   current_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" '(.users[$u].nodes // [])')"
 
@@ -2350,7 +2352,6 @@ user_manage_package_menu() {
   clear >&2
   print_rect_title "套餐设置" >&2
   show_user_status_table "$db_json" >&2
-  ui_echo "${B}--------------------------------------------------------${NC}"
 
   current_mode="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].traffic_mode // "down"')"
   current_quota="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].quota_gb // 0')"
@@ -2459,7 +2460,6 @@ user_manage_single() {
     clear
     print_rect_title "管理用户"
     show_user_status_table "$db_json"
-    echo -e "${B}--------------------------------------------------------${NC}"
     echo "当前用户：$username"
     if [ "$username" = "admin" ]; then
       echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
@@ -2543,7 +2543,6 @@ user_select_and_manage_menu() {
   clear
   print_rect_title "管理用户"
   show_user_status_table "$db_json"
-  echo -e "${B}--------------------------------------------------------${NC}"
   mapfile -t usernames < <(user_db_all_users "$db_json")
   local i=1
   for username in "${usernames[@]}"; do
@@ -2569,7 +2568,6 @@ user_delete_menu() {
   clear
   print_rect_title "删除用户"
   show_user_status_table "$db_json"
-  echo -e "${B}--------------------------------------------------------${NC}"
   mapfile -t usernames < <(echo "$db_json" | jq -r '.users | keys[] | select(. != "admin")')
   if [ ${#usernames[@]} -eq 0 ]; then
     warn "当前没有可删除的普通用户。"
@@ -2752,7 +2750,6 @@ user_manager_menu() {
     print_rect_title "用户管理"
     db_json="$(user_db_load)"
     show_user_status_table "$db_json"
-    echo -e "${B}--------------------------------------------------------${NC}"
     echo -e "  ${C}1.${NC} 新增用户"
     echo -e "  ${C}2.${NC} 管理用户"
     echo -e "  ${C}3.${NC} 删除用户"
@@ -3194,19 +3191,16 @@ maintain_script_log_file() {
 }
 
 maintain_logs() {
-  if has_cmd journalctl; then
-    journalctl --rotate >/dev/null 2>&1 || true
-    journalctl --vacuum-size=10M >/dev/null 2>&1 || true
-  fi
   maintain_script_log_file "$SCRIPT_LOG_FILE" "$LOG_MAX_BYTES" || true
   return 0
 }
 
-config_force_log_warn() {
+config_force_access_log_settings() {
   [ -s "$CONFIG_FILE" ] || return 0
+  mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
   local json updated
   json="$(config_load)" || return 1
-  updated="$(echo "$json" | jq '.log = (.log // {}) | .log.level = "warn" | .log.timestamp = true')" || return 1
+  updated="$(echo "$json" | jq '.log = (.log // {}) | .log.level = "info" | .log.output = "/var/log/sing-box/access.log" | .log.timestamp = true')" || return 1
   config_apply "$updated" || return 1
 }
 
@@ -3317,6 +3311,7 @@ prepare_script_runtime() {
   migrate_legacy_user_db_if_needed
   write_managed_singbox_service
   ensure_command_compat_links
+  mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
   systemctl daemon-reload
   ok "脚本运行环境已就绪。"
 }
@@ -3459,7 +3454,7 @@ install_or_update_singbox() {
   # 纯安装/纯更新：准备脚本运行环境
   prepare_script_runtime
   config_ensure_exists
-  config_force_log_warn || true
+  config_force_access_log_settings || true
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
   install_user_watch_cron || true
@@ -3501,7 +3496,7 @@ uninstall_singbox_keep_config() {
   require_root
   clear
   echo -e "${R}--- 卸载 sing-box（保留 /etc/sing-box/ 配置）---${NC}"
-  echo -e "${Y}注意：该操作将卸载接管层、官方安装残留、cron 与运行文件，但保留配置与用户数据库。${NC}"
+  echo -e "${Y}注意：该操作将卸载接管层、官方安装残留、cron 与运行文件，但保留配置、用户数据、日志文件。${NC}"
   ask_confirm_yes || { warn "已取消卸载。"; pause; return 0; }
 
   has_cmd apt-get || { err "未找到 apt-get。"; pause; return 1; }
@@ -4061,17 +4056,45 @@ clear_config_json() {
   pause
 }
 
+view_realtime_log() {
+  clear
+  print_rect_title "查看实时日志"
+  if [ ! -f "$SCRIPT_LOG_FILE" ]; then
+    warn "当前暂无日志文件：$SCRIPT_LOG_FILE"
+    pause
+    return 0
+  fi
+
+  echo -e "${Y}[WARN]${NC} 正在显示最近 100 行日志，并进入实时跟踪；按 Ctrl+C 返回菜单。"
+
+  local old_trap
+  old_trap="$(trap -p INT || true)"
+
+  trap 'echo ""; trap - INT; return 0' INT
+  tail -n 100 -f "$SCRIPT_LOG_FILE"
+  trap - INT
+
+  if [ -n "$old_trap" ]; then
+    eval "$old_trap"
+  fi
+
+  echo ""
+  return 0
+}
+
 system_tools_menu() {
   while true; do
     clear
     print_rect_title "系统工具"
     echo -e "  ${C}1.${NC} 一键同步系统时间"
     echo -e "  ${C}2.${NC} 规范化接管"
+    echo -e "  ${C}3.${NC} 查看实时日志"
     echo -e "  ${R}0.${NC} 返回主菜单"
     read -r -p "请选择操作: " act
     case "${act:-}" in
       1) sync_system_time_chrony ;;
       2) normalize_takeover ;;
+      3) view_realtime_log ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
