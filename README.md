@@ -69,5 +69,3 @@ rm -rf /etc/sing-box-manager
 rm -rf /var/log/sing-box
 rm -rf /var/lib/sing-box
 ```
-
-> 💡 **提示**：执行完毕后，即可彻底卸载干净脚本本体、所有节点配置、用户数据数据库以及运行日志，还你一个纯净的系统环境。
