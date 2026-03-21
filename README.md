@@ -53,3 +53,21 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs
   
 * **系统时间校准 (Chrony)**：
   系统工具中提供了一键安装并启用 `chrony` 服务的功能。**强烈推荐执行此项**，因为精准的系统时间是保障流量统计准确性以及 Shadowsocks2022 等防重放协议稳定运行的必要条件。
+
+## 彻底卸载删除
+
+为确保彻底卸载并清理所有残留环境，请按以下步骤操作：
+
+1. **第一步**：先运行脚本，选择菜单中的 **`9. 卸载 sing-box`**。
+2. **第二步**：在终端直接复制并执行以下命令：
+
+```bash
+rm -f /root/sing-box.sh
+rm -f /usr/local/bin/sb
+rm -rf /etc/sing-box
+rm -rf /etc/sing-box-manager
+rm -rf /var/log/sing-box
+rm -rf /var/lib/sing-box
+```
+
+> 💡 **提示**：执行完毕后，即可彻底卸载干净脚本本体、所有节点配置、用户数据数据库以及运行日志，还你一个纯净的系统环境。
