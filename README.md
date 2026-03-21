@@ -54,6 +54,8 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs
 * **系统时间校准 (Chrony)**：
   系统工具中提供了一键安装并启用 `chrony` 服务的功能。**强烈推荐执行此项**，因为精准的系统时间是保障流量统计准确性以及 Shadowsocks2022 等防重放协议稳定运行的必要条件。
 
+---
+
 ## 彻底卸载删除
 
 为确保彻底卸载并清理所有残留环境，请按以下步骤操作：
