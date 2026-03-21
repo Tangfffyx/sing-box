@@ -22,7 +22,7 @@ CONFIG_FILE="/etc/sing-box/config.json"
 TEMP_FILE="/etc/sing-box/config.json.tmp"
 SCRIPT_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
 SB_TARGET_SCRIPT="/root/sing-box.sh"
-SB_SHORTCUT="/usr/local/bin/sb"
+SB_SHORTCUT="/usr/local/bin/dsb"
 REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh"
 SINGBOX_RELEASE_REPO="Tangfffyx/sing-box"
 SINGBOX_INSTALL_DIR="/usr/local/bin"
@@ -32,9 +32,13 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.6.6"
+SCRIPT_VERSION="3.7.2"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
+LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
+LOG_MAINTAIN_CRON_SCHEDULE="0 4 * * *"
+SCRIPT_LOG_FILE="/var/log/sing-box-manager.log"
+LOG_MAX_BYTES=$((10 * 1024 * 1024))
 
 # ---------- UI ----------
 B='\033[1;34m'; G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'; C='\033[1;36m'; NC='\033[0m'; W='\033[1;37m'
@@ -223,7 +227,7 @@ ask_port_or_return() {
 config_min_template() {
   cat <<'JSON'
 {
-  "log": {"level": "info", "timestamp": true},
+  "log": {"level": "warn", "timestamp": true},
   "inbounds": [],
   "outbounds": [
     {"type": "direct", "tag": "direct"},
@@ -243,7 +247,7 @@ config_normalize() {
   echo "$json" | jq '
     if type != "object" then
       {
-        "log": {"level":"info","timestamp":true},
+        "log": {"level":"warn","timestamp":true},
         "inbounds": [],
         "outbounds": [
           {"type":"direct","tag":"direct"},
@@ -252,7 +256,7 @@ config_normalize() {
         "route": {"rules": [], "final": "reject"}
       }
     else . end
-    | .log = (.log // {"level":"info","timestamp":true})
+    | .log = (.log // {"level":"warn","timestamp":true})
     | .inbounds = (.inbounds // [])
     | .outbounds = (.outbounds // [])
     | .route = (.route // {"rules": [], "final": "reject"})
@@ -2767,6 +2771,83 @@ user_manager_menu() {
 # ====================================================
 # 600 Export
 # ====================================================
+
+b64_std_no_wrap() {
+  printf '%s' "${1:-}" | openssl base64 -A 2>/dev/null | tr -d '\n'
+}
+
+url_encode() {
+  printf '%s' "${1:-}" | jq -sRr @uri
+}
+
+build_v2rayn_ss_link() {
+  local server="$1" port="$2" method="$3" password="$4" name="$5"
+  local userinfo enc
+  userinfo="${method}:${password}"
+  enc="$(b64_std_no_wrap "$userinfo")"
+  printf 'ss://%s@%s:%s#%s' "$enc" "$server" "$port" "$(url_encode "$name")"
+}
+
+build_v2rayn_vmess_ws_link() {
+  local server="$1" uuid="$2" host="$3" path="$4" name="$5"
+  local payload enc
+  payload="$(jq -nc \
+    --arg ps "$name" \
+    --arg add "$server" \
+    --arg port "443" \
+    --arg id "$uuid" \
+    --arg aid "0" \
+    --arg scy "auto" \
+    --arg net "ws" \
+    --arg type "none" \
+    --arg host "$host" \
+    --arg path "$path" \
+    --arg tls "tls" \
+    --arg sni "$host" \
+    '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:$aid,scy:$scy,net:$net,type:$type,host:$host,path:$path,tls:$tls,sni:$sni}')"
+  enc="$(b64_std_no_wrap "$payload")"
+  printf 'vmess://%s' "$enc"
+}
+
+build_v2rayn_vless_reality_link() {
+  local server="$1" port="$2" uuid="$3" sni="$4" pbk="$5" sid="$6" flow="$7" name="$8"
+  printf 'vless://%s@%s:%s?encryption=none&flow=%s&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s' \
+    "$uuid" "$server" "$port" \
+    "$(url_encode "$flow")" \
+    "$(url_encode "$sni")" \
+    "$(url_encode "$pbk")" \
+    "$(url_encode "$sid")" \
+    "$(url_encode "$name")"
+}
+
+build_v2rayn_vless_ws_link() {
+  local server="$1" uuid="$2" host="$3" path="$4" name="$5"
+  printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s' \
+    "$uuid" "$server" \
+    "$(url_encode "$host")" \
+    "$(url_encode "$host")" \
+    "$(url_encode "$path")" \
+    "$(url_encode "$name")"
+}
+
+build_v2rayn_anytls_link() {
+  local server="$1" port="$2" password="$3" sni="$4" name="$5"
+  printf 'anytls://%s@%s:%s?sni=%s&fp=chrome&alpn=%s&allowInsecure=1#%s' \
+    "$(url_encode "$password")" "$server" "$port" \
+    "$(url_encode "$sni")" \
+    "$(url_encode "h2,http/1.1")" \
+    "$(url_encode "$name")"
+}
+
+build_v2rayn_tuic_link() {
+  local server="$1" port="$2" uuid="$3" password="$4" sni="$5" name="$6"
+  printf 'tuic://%s:%s@%s:%s?sni=%s&alpn=%s&allow_insecure=1&congestion_control=bbr#%s' \
+    "$uuid" "$(url_encode "$password")" "$server" "$port" \
+    "$(url_encode "$sni")" \
+    "$(url_encode "h3")" \
+    "$(url_encode "$name")"
+}
+
 export_collect_context() {
   local json="$1"
   local ip ws_domain vm_domain inventory
@@ -2821,7 +2902,7 @@ export_configs() {
     server_p="$(echo "$inbound" | jq -r '.password // empty')"
 
     while read -r user; do
-      local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key
+      local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
       name="$(echo "$user" | jq -r '.name // empty')"
       uuid="$(echo "$user" | jq -r '.uuid // empty')"
       pass="$(echo "$user" | jq -r '.password // empty')"
@@ -2851,6 +2932,9 @@ ${W}[${out_name}]${NC}"
             echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: $port, uuid: $uuid, network: tcp, udp: true, tls: true, flow: ${flow}, servername: $sni, reality-opts: {public-key: $reality_public_key, short-id: '$sid'}, client-fingerprint: chrome}"
             echo ""
             echo -e " Quantumult X: vless=$ip:$port, method=none, password=$uuid, obfs=over-tls, obfs-host=$sni, reality-base64-pubkey=$reality_public_key, reality-hex-shortid=$sid, vless-flow=${flow}, udp-relay=true, tag=${out_name}"
+            echo ""
+            v2rayn_link="$(build_v2rayn_vless_reality_link "$ip" "$port" "$uuid" "$sni" "$reality_public_key" "$sid" "$flow" "$out_name")"
+            echo -e " v2rayN: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         anytls)
@@ -2861,6 +2945,9 @@ ${W}[${out_name}]${NC}"
             echo -e " Clash: - {name: ${out_name}, type: anytls, server: $ip, port: $port, password: \"${pass}\", client-fingerprint: chrome, udp: true, sni: \"${sni}\", alpn: [h2, http/1.1], skip-cert-verify: true}"
             echo ""
             echo -e " Surge: ${out_name} = anytls, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
+            echo ""
+            v2rayn_link="$(build_v2rayn_anytls_link "$ip" "$port" "$pass" "$sni" "$out_name")"
+            echo -e " v2rayN: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         shadowsocks)
@@ -2874,6 +2961,9 @@ ${W}[${out_name}]${NC}"
             echo -e " Quantumult X: shadowsocks=$ip:${port}, method=${method}, password=${pw_out}, udp-relay=true, tag=${out_name}"
             echo ""
             echo -e " Surge: ${out_name} = ss, ${ip}, ${port}, encrypt-method=${method}, password=${pw_out}, udp-relay=true"
+            echo ""
+            v2rayn_link="$(build_v2rayn_ss_link "$ip" "$port" "$method" "$pw_out" "$out_name")"
+            echo -e " v2rayN: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         vmess-ws)
@@ -2886,6 +2976,9 @@ ${W}[${out_name}]${NC}"
             echo -e " Quantumult X: vmess=$ip:443, method=chacha20-poly1305, password=${uuid}, obfs=wss, obfs-host=${vm_domain}, obfs-uri=${path}?ed=2048, fast-open=false, udp-relay=true, tag=${out_name}"
             echo ""
             echo -e " Surge: ${out_name} = vmess, ${ip}, 443, username=${uuid}, tls=true, vmess-aead=true, ws=true, ws-path=${path}?ed=2048, sni=${vm_domain}, ws-headers=Host:${vm_domain}, skip-cert-verify=false, udp-relay=true, tfo=false"
+            echo ""
+            v2rayn_link="$(build_v2rayn_vmess_ws_link "$ip" "$uuid" "$vm_domain" "${path}?ed=2048" "$out_name")"
+            echo -e " v2rayN: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         vless-ws)
@@ -2896,6 +2989,9 @@ ${W}[${out_name}]${NC}"
             echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: 443, uuid: ${uuid}, udp: true, tls: true, network: ws, servername: ${ws_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${ws_domain}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}}"
             echo ""
             echo -e " Quantumult X: vless=$ip:443,method=none,password=${uuid},obfs=wss,obfs-host=${ws_domain},obfs-uri=${path}?ed=2048,fast-open=false,udp-relay=true,tag=${out_name}"
+            echo ""
+            v2rayn_link="$(build_v2rayn_vless_ws_link "$ip" "$uuid" "$ws_domain" "${path}?ed=2048" "$out_name")"
+            echo -e " v2rayN: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         tuic)
@@ -2907,6 +3003,9 @@ ${W}[${out_name}]${NC}"
             echo -e " Clash: - {name: ${out_name}, type: tuic, server: $ip, port: $port, uuid: $uuid, password: $pass, alpn: [h3], disable-sni: false, reduce-rtt: false, udp-relay-mode: native, congestion-controller: bbr, skip-cert-verify: true, sni: $sni}"
             echo ""
             echo -e " Surge: ${out_name} = tuic-v5, ${ip}, ${port}, password=${pass}, sni=${sni}, uuid=${uuid}, alpn=h3, ecn=true"
+            echo ""
+            v2rayn_link="$(build_v2rayn_tuic_link "$ip" "$port" "$uuid" "$pass" "$sni" "$out_name")"
+            echo -e " v2rayN: ${v2rayn_link}"
           } >> "$target_file"
           ;;
       esac
@@ -3042,14 +3141,14 @@ install_script_self() {
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
   if [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]] || [[ "$current" == /dev/fd/* ]] || [[ "$current" == /proc/self/fd/* ]]; then
     curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" || {
-      warn "快捷命令 sb 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
+      warn "快捷命令 dsb 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
       return 1
     }
   else
     current="$(readlink -f "$current" 2>/dev/null || echo "$current")"
     if [ "$current" != "$SB_TARGET_SCRIPT" ]; then
       cp -f "$current" "$SB_TARGET_SCRIPT" || {
-        warn "快捷命令 sb 安装失败：无法复制脚本到 $SB_TARGET_SCRIPT"
+        warn "快捷命令 dsb 安装失败：无法复制脚本到 $SB_TARGET_SCRIPT"
         return 1
       }
     fi
@@ -3068,9 +3167,71 @@ EOF2
 ensure_sb_shortcut() {
   install_script_self || return 1
   install_sb_shortcut
-  ok "已创建脚本快捷键：sb"
+  ok "已创建脚本快捷键：dsb"
 }
 
+
+
+maintain_script_log_file() {
+  local log_file="${1:-$SCRIPT_LOG_FILE}" max_bytes="${2:-$LOG_MAX_BYTES}"
+  [ -n "$log_file" ] || return 0
+  [ -f "$log_file" ] || return 0
+  [ -s "$log_file" ] || return 0
+
+  local size tmp
+  size="$(wc -c < "$log_file" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[0-9]+$ ]] || size=0
+  [ "$size" -le "$max_bytes" ] && return 0
+
+  tmp="$(mktemp)"
+  tail -c "$max_bytes" "$log_file" > "$tmp" 2>/dev/null || {
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 1
+  }
+  cat "$tmp" > "$log_file"
+  rm -f "$tmp" >/dev/null 2>&1 || true
+  return 0
+}
+
+maintain_logs() {
+  if has_cmd journalctl; then
+    journalctl --rotate >/dev/null 2>&1 || true
+    journalctl --vacuum-size=10M >/dev/null 2>&1 || true
+  fi
+  maintain_script_log_file "$SCRIPT_LOG_FILE" "$LOG_MAX_BYTES" || true
+  return 0
+}
+
+config_force_log_warn() {
+  [ -s "$CONFIG_FILE" ] || return 0
+  local json updated
+  json="$(config_load)" || return 1
+  updated="$(echo "$json" | jq '.log = (.log // {}) | .log.level = "warn" | .log.timestamp = true')" || return 1
+  config_apply "$updated" || return 1
+}
+
+install_log_maintain_cron() {
+  has_cmd crontab || return 1
+  local tmp
+  tmp="$(mktemp)"
+  crontab -l 2>/dev/null | grep -v "${LOG_MAINTAIN_CRON_MARK}" > "$tmp" || true
+  echo "${LOG_MAINTAIN_CRON_SCHEDULE} bash ${SB_TARGET_SCRIPT} --maintain-logs >/dev/null 2>&1" >> "$tmp"
+  crontab "$tmp"
+  rm -f "$tmp"
+}
+
+remove_log_maintain_cron() {
+  has_cmd crontab || return 0
+  local tmp
+  tmp="$(mktemp)"
+  crontab -l 2>/dev/null | grep -v "${LOG_MAINTAIN_CRON_MARK}" > "$tmp" || true
+  if [ -s "$tmp" ]; then
+    crontab "$tmp"
+  else
+    crontab -r 2>/dev/null || true
+  fi
+  rm -f "$tmp"
+}
 
 install_user_watch_cron() {
   has_cmd crontab || return 1
@@ -3146,7 +3307,7 @@ migrate_legacy_user_db_if_needed() {
 is_script_managed_environment() {
   [ -f /etc/systemd/system/sing-box.service ] || return 1
   grep -Fq "ExecStart=${SINGBOX_BIN} -D /var/lib/sing-box -c /etc/sing-box/config.json run" /etc/systemd/system/sing-box.service 2>/dev/null || return 1
-  [ -f /usr/local/bin/sb ] && grep -Fq 'exec bash /root/sing-box.sh "$@"' /usr/local/bin/sb 2>/dev/null || return 1
+  [ -f /usr/local/bin/dsb ] && grep -Fq 'exec bash /root/sing-box.sh "$@"' /usr/local/bin/dsb 2>/dev/null || return 1
   return 0
 }
 
@@ -3298,9 +3459,11 @@ install_or_update_singbox() {
   # 纯安装/纯更新：准备脚本运行环境
   prepare_script_runtime
   config_ensure_exists
+  config_force_log_warn || true
   enable_now_singbox_safe || true
   ensure_sb_shortcut || true
   install_user_watch_cron || true
+  install_log_maintain_cron || true
   show_versions
   pause
 }
@@ -3344,6 +3507,7 @@ uninstall_singbox_keep_config() {
   has_cmd apt-get || { err "未找到 apt-get。"; pause; return 1; }
   sync_user_usage_counters || true
   remove_user_watch_cron || true
+  remove_log_maintain_cron || true
   systemctl stop sing-box >/dev/null 2>&1 || true
   systemctl disable sing-box >/dev/null 2>&1 || true
   remove_all_singbox_service_units
@@ -3963,6 +4127,11 @@ sync_runtime_script_entrypoints
 
 if [[ "${1:-}" == "--user-watch" ]]; then
   user_watch_run
+  exit 0
+fi
+
+if [[ "${1:-}" == "--maintain-logs" ]]; then
+  maintain_logs
   exit 0
 fi
 
