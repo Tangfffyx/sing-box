@@ -12,7 +12,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/head
 sudo bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh)
 ```
 
-* **快捷命令**：安装完成后，在终端输入 `dsb` 即可唤出管理菜单。
+* **快捷命令**：安装完成后，在终端输入 `s` 即可唤出管理菜单。
 * **避免冲突**：如果当前系统已安装官方版本的 sing-box，推荐先在菜单中执行“9. 卸载 sing-box”（保留配置），再执行“1. 安装/更新 sing-box”进行环境接管。
 
 ---
@@ -63,7 +63,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/Tangfffyx/sing-box/refs
 
 ```bash
 rm -f /root/sing-box.sh
-rm -f /usr/local/bin/sb
+rm -f /usr/local/bin/s
 rm -rf /etc/sing-box
 rm -rf /etc/sing-box-manager
 rm -rf /var/log/sing-box
