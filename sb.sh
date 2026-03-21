@@ -32,7 +32,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="3.7.2"
+SCRIPT_VERSION="3.7.3"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -2934,7 +2934,7 @@ ${W}[${out_name}]${NC}"
             echo -e " Quantumult X: vless=$ip:$port, method=none, password=$uuid, obfs=over-tls, obfs-host=$sni, reality-base64-pubkey=$reality_public_key, reality-hex-shortid=$sid, vless-flow=${flow}, udp-relay=true, tag=${out_name}"
             echo ""
             v2rayn_link="$(build_v2rayn_vless_reality_link "$ip" "$port" "$uuid" "$sni" "$reality_public_key" "$sid" "$flow" "$out_name")"
-            echo -e " v2rayN: ${v2rayn_link}"
+            echo -e " 通用链接: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         anytls)
@@ -2947,7 +2947,7 @@ ${W}[${out_name}]${NC}"
             echo -e " Surge: ${out_name} = anytls, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
             echo ""
             v2rayn_link="$(build_v2rayn_anytls_link "$ip" "$port" "$pass" "$sni" "$out_name")"
-            echo -e " v2rayN: ${v2rayn_link}"
+            echo -e " 通用链接: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         shadowsocks)
@@ -2963,7 +2963,7 @@ ${W}[${out_name}]${NC}"
             echo -e " Surge: ${out_name} = ss, ${ip}, ${port}, encrypt-method=${method}, password=${pw_out}, udp-relay=true"
             echo ""
             v2rayn_link="$(build_v2rayn_ss_link "$ip" "$port" "$method" "$pw_out" "$out_name")"
-            echo -e " v2rayN: ${v2rayn_link}"
+            echo -e " 通用链接: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         vmess-ws)
@@ -2978,7 +2978,7 @@ ${W}[${out_name}]${NC}"
             echo -e " Surge: ${out_name} = vmess, ${ip}, 443, username=${uuid}, tls=true, vmess-aead=true, ws=true, ws-path=${path}?ed=2048, sni=${vm_domain}, ws-headers=Host:${vm_domain}, skip-cert-verify=false, udp-relay=true, tfo=false"
             echo ""
             v2rayn_link="$(build_v2rayn_vmess_ws_link "$ip" "$uuid" "$vm_domain" "${path}?ed=2048" "$out_name")"
-            echo -e " v2rayN: ${v2rayn_link}"
+            echo -e " 通用链接: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         vless-ws)
@@ -2991,7 +2991,7 @@ ${W}[${out_name}]${NC}"
             echo -e " Quantumult X: vless=$ip:443,method=none,password=${uuid},obfs=wss,obfs-host=${ws_domain},obfs-uri=${path}?ed=2048,fast-open=false,udp-relay=true,tag=${out_name}"
             echo ""
             v2rayn_link="$(build_v2rayn_vless_ws_link "$ip" "$uuid" "$ws_domain" "${path}?ed=2048" "$out_name")"
-            echo -e " v2rayN: ${v2rayn_link}"
+            echo -e " 通用链接: ${v2rayn_link}"
           } >> "$target_file"
           ;;
         tuic)
@@ -3005,7 +3005,7 @@ ${W}[${out_name}]${NC}"
             echo -e " Surge: ${out_name} = tuic-v5, ${ip}, ${port}, password=${pass}, sni=${sni}, uuid=${uuid}, alpn=h3, ecn=true"
             echo ""
             v2rayn_link="$(build_v2rayn_tuic_link "$ip" "$port" "$uuid" "$pass" "$sni" "$out_name")"
-            echo -e " v2rayN: ${v2rayn_link}"
+            echo -e " 通用链接: ${v2rayn_link}"
           } >> "$target_file"
           ;;
       esac
