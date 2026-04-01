@@ -727,6 +727,13 @@ user_db_cleanup_missing_nodes() {
   )"
   echo "$db_json" | jq --argjson available "$available_json" '
     .users |= with_entries(
+      if (.value.allow_all_nodes // false) == true then
+        .value.allow_all_nodes = false
+        | .value.nodes = $available
+      else
+        .
+      end
+      |
       .value.nodes = (
         (.value.nodes // [])
         | map(select(($available | index(.)) != null))
@@ -877,14 +884,10 @@ user_show_info() {
       + "套餐总量：" + $quota + "\n"
       + "重置日：" + (if (($x.reset_day // 0) == 0) then "不重置" elif (($x.reset_day // 0) == 32) then "月底" else (($x.reset_day|tostring)+"号") end) + "\n"
       + "到期时间：" + (if (($x.expire_at // "0") == "0") then "永久" else $x.expire_at end) + "\n"
-      + "节点策略：" + (if ($x.allow_all_nodes // false) then "全部节点" else "自定义节点" end)
+      + "节点策略：自定义节点"
   '
   echo "允许节点："
-  if echo "$db_json" | jq -e --arg u "$username" '.users[$u].allow_all_nodes == true' >/dev/null 2>&1; then
-    echo "  - 全部节点"
-  else
-    echo "$db_json" | jq -r --arg u "$username" '.users[$u].nodes[]? // empty' | sed 's/^/  - /'
-  fi
+  echo "$db_json" | jq -r --arg u "$username" '.users[$u].nodes[]? // empty' | sed 's/^/  - /'
 }
 
 user_add_menu() {
@@ -941,36 +944,27 @@ user_manage_permission_menu() {
     user_db_save "$cleaned_db_json"
   fi
   db_json="$cleaned_db_json"
-  local current_nodes_json current_allow_all
+  local current_nodes_json
   local nodes=() node i raw picks=() invalid=0 sel idx selected_json new_db
 
   clear >&2
   print_rect_title "节点权限" >&2
   show_user_status_table "$db_json" >&2
-  current_allow_all="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].allow_all_nodes // false')"
   current_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" '(.users[$u].nodes // [])')"
 
-  if [ "$current_allow_all" = "true" ]; then
-    ui_echo "当前权限类型：全部节点"
-  else
-    ui_echo "当前权限类型：自定义节点"
-  fi
+  ui_echo "当前权限类型：自定义节点"
   ui_echo "当前已分配节点："
-  if [ "$current_allow_all" = "true" ]; then
-    ui_echo "- 全部节点"
-  else
-    while IFS= read -r node; do
-      [ -n "$node" ] && ui_echo "- $node"
-    done < <(echo "$current_nodes_json" | jq -r '.[]?')
-    if ! echo "$current_nodes_json" | jq -e 'length > 0' >/dev/null 2>&1; then
-      ui_echo "- （无）"
-    fi
+  while IFS= read -r node; do
+    [ -n "$node" ] && ui_echo "- $node"
+  done < <(echo "$current_nodes_json" | jq -r '.[]?')
+  if ! echo "$current_nodes_json" | jq -e 'length > 0' >/dev/null 2>&1; then
+    ui_echo "- （无）"
   fi
   ui_echo "${B}--------------------------------------------------------${NC}"
 
   mapfile -t nodes < <(list_all_node_keys "$json")
   ui_echo "可选节点："
-  ui_echo "  1. 全部节点"
+  ui_echo "  1. 当前全部节点（静态快照）"
   i=2
   for node in "${nodes[@]}"; do
     ui_echo "  ${i}. ${node}"
@@ -994,7 +988,8 @@ user_manage_permission_menu() {
 
   if printf '%s
 ' "${picks[@]}" | grep -qx '1'; then
-    new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].allow_all_nodes = true | .users[$u].nodes = []')"
+    selected_json="$(printf '%s\n' "${nodes[@]}" | awk 'NF' | LC_ALL=C sort -u | jq -R . | jq -s '.')"
+    new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].allow_all_nodes = false | .users[$u].nodes = $nodes')"
     echo "$new_db"
     return 0
   fi
