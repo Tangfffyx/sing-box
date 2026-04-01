@@ -15,6 +15,13 @@ set -Eeuo pipefail
 # ====================================================
 # Project : Sing-box Elite Management System
 # Notes   : Single-file refactor, managed-route rebuild, no legacy compatibility.
+# QA      : Manual regression checklist (run after each release):
+#           1) 核心模块安装：Reality / AnyTLS / Shadowsocks / Trojan / VMess-WS / VLESS-WS / TUIC
+#           2) 端口冲突：重复输入同协议同端口，必须提示冲突并要求重填
+#           3) 导出配置：各协议链接非空，含 query 参数与 #名称片段
+#           4) 用户管理：新增用户、授权节点、查看状态正常
+#           5) 定时任务：系统工具 -> 定时任务管理，安装/移除状态与行为一致
+#           6) 快捷入口：s 启动脚本版本与当前发布版本一致
 # ====================================================
 
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -31,7 +38,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.16"
+SCRIPT_VERSION="4.1.17"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
