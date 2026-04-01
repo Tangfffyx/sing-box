@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.5"
+SCRIPT_VERSION="4.1.6"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -3240,9 +3240,13 @@ script_version_of_file() {
 
 copy_running_script_to_target() {
   local current="${1:-${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}}"
-  if [ -r "$current" ] && cat "$current" > "$SB_TARGET_SCRIPT" 2>/dev/null; then
-    return 0
-  fi
+  local src
+  for src in "$current" "/proc/$$/fd/255" "/dev/fd/255"; do
+    [ -r "$src" ] || continue
+    if cat "$src" > "$SB_TARGET_SCRIPT" 2>/dev/null; then
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -3255,9 +3259,7 @@ sync_runtime_script_entrypoints() {
 
   if [[ "$resolved" == /dev/fd/* ]] || [[ "$resolved" == /proc/self/fd/* ]] || [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]]; then
     if [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; then
-      copy_running_script_to_target "$current" \
-        || curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" >/dev/null 2>&1 \
-        || true
+      copy_running_script_to_target "$current" || true
     fi
   else
     if [ "$resolved" != "$SB_TARGET_SCRIPT" ] && { [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; }; then
@@ -3273,10 +3275,16 @@ install_script_self() {
   mkdir -p /usr/local/bin
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
   if [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]] || [[ "$current" == /dev/fd/* ]] || [[ "$current" == /proc/self/fd/* ]]; then
-    copy_running_script_to_target "$current" || curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" || {
-      warn "快捷命令 s 安装失败：无法保存当前脚本到 $SB_TARGET_SCRIPT"
-      return 1
-    }
+    if ! copy_running_script_to_target "$current"; then
+      if [ ! -s "$SB_TARGET_SCRIPT" ]; then
+        curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" || {
+          warn "快捷命令 s 安装失败：无法保存当前脚本到 $SB_TARGET_SCRIPT"
+          return 1
+        }
+      else
+        warn "当前会话来自管道执行，未能读取运行中脚本；已保留现有 $SB_TARGET_SCRIPT 不覆盖。"
+      fi
+    fi
   else
     current="$(readlink -f "$current" 2>/dev/null || echo "$current")"
     if [ "$current" != "$SB_TARGET_SCRIPT" ]; then
