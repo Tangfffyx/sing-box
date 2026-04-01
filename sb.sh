@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.29"
+SCRIPT_VERSION="4.1.30"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -781,7 +781,7 @@ sync_runtime_script_entrypoints() {
       download_remote_module_to_target "cron.sh" || true
     fi
   else
-    if [ "$resolved" != "$SB_TARGET_SCRIPT" ] && { [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; }; then
+    if [ "$resolved" != "$SB_TARGET_SCRIPT" ]; then
       cp -f "$resolved" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
       copy_local_module_to_target "$resolved" "config.sh" >/dev/null 2>&1 || true
       copy_local_module_to_target "$resolved" "protocol.sh" >/dev/null 2>&1 || true
@@ -830,12 +830,12 @@ install_script_self() {
         warn "快捷命令 s 安装失败：无法复制脚本到 $SB_TARGET_SCRIPT"
         return 1
       }
-      copy_local_module_to_target "$current" "config.sh" >/dev/null 2>&1 || true
-      copy_local_module_to_target "$current" "protocol.sh" >/dev/null 2>&1 || true
-      copy_local_module_to_target "$current" "user.sh" >/dev/null 2>&1 || true
-      copy_local_module_to_target "$current" "export.sh" >/dev/null 2>&1 || true
-      copy_local_module_to_target "$current" "cron.sh" >/dev/null 2>&1 || true
     fi
+    copy_local_module_to_target "$current" "config.sh" >/dev/null 2>&1 || true
+    copy_local_module_to_target "$current" "protocol.sh" >/dev/null 2>&1 || true
+    copy_local_module_to_target "$current" "user.sh" >/dev/null 2>&1 || true
+    copy_local_module_to_target "$current" "export.sh" >/dev/null 2>&1 || true
+    copy_local_module_to_target "$current" "cron.sh" >/dev/null 2>&1 || true
   fi
   chmod +x "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
 }
