@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.32"
+SCRIPT_VERSION="4.1.33"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -764,6 +764,12 @@ download_remote_module_to_target() {
   curl -fsSL "${REMOTE_SCRIPT_BASE_URL}/lib/${module_file}" -o "${target_base}/lib/${module_file}"
 }
 
+sync_module_to_target() {
+  local source_script="$1" module_file="$2"
+  copy_local_module_to_target "$source_script" "$module_file" >/dev/null 2>&1 && return 0
+  download_remote_module_to_target "$module_file" >/dev/null 2>&1
+}
+
 sync_runtime_script_entrypoints() {
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
   local resolved current_ver target_ver
@@ -783,11 +789,11 @@ sync_runtime_script_entrypoints() {
   else
     if [ "$resolved" != "$SB_TARGET_SCRIPT" ]; then
       cp -f "$resolved" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-      copy_local_module_to_target "$resolved" "config.sh" >/dev/null 2>&1 || true
-      copy_local_module_to_target "$resolved" "protocol.sh" >/dev/null 2>&1 || true
-      copy_local_module_to_target "$resolved" "user.sh" >/dev/null 2>&1 || true
-      copy_local_module_to_target "$resolved" "export.sh" >/dev/null 2>&1 || true
-      copy_local_module_to_target "$resolved" "cron.sh" >/dev/null 2>&1 || true
+      sync_module_to_target "$resolved" "config.sh" || true
+      sync_module_to_target "$resolved" "protocol.sh" || true
+      sync_module_to_target "$resolved" "user.sh" || true
+      sync_module_to_target "$resolved" "export.sh" || true
+      sync_module_to_target "$resolved" "cron.sh" || true
     fi
   fi
 
@@ -831,11 +837,11 @@ install_script_self() {
         return 1
       }
     fi
-    copy_local_module_to_target "$current" "config.sh" >/dev/null 2>&1 || true
-    copy_local_module_to_target "$current" "protocol.sh" >/dev/null 2>&1 || true
-    copy_local_module_to_target "$current" "user.sh" >/dev/null 2>&1 || true
-    copy_local_module_to_target "$current" "export.sh" >/dev/null 2>&1 || true
-    copy_local_module_to_target "$current" "cron.sh" >/dev/null 2>&1 || true
+    sync_module_to_target "$current" "config.sh" || true
+    sync_module_to_target "$current" "protocol.sh" || true
+    sync_module_to_target "$current" "user.sh" || true
+    sync_module_to_target "$current" "export.sh" || true
+    sync_module_to_target "$current" "cron.sh" || true
   fi
   chmod +x "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
 }
