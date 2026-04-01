@@ -116,6 +116,34 @@ require_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+json_file_load_or_fallback() {
+  local file="$1" fallback_json="$2" validator="${3:-.}"
+  if [ -s "$file" ] && jq -e "$validator" "$file" >/dev/null 2>&1; then
+    cat "$file"
+  else
+    printf '%s\n' "$fallback_json"
+  fi
+}
+
+json_file_save_pretty() {
+  local file="$1" json="$2"
+  shift 2 || true
+
+  local dir tmp
+  dir="$(dirname "$file")"
+  mkdir -p "$dir" "$@"
+
+  tmp="$(mktemp "${file}.tmp.XXXXXX")" || return 1
+  if ! printf '%s\n' "$json" | jq . > "$tmp"; then
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if ! mv -f "$tmp" "$file"; then
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
 singbox_service_active() {
   has_cmd systemctl && systemctl is-active --quiet sing-box 2>/dev/null
 }
@@ -267,11 +295,9 @@ config_normalize() {
 }
 
 config_load() {
-  if [ -s "$CONFIG_FILE" ] && jq -e . "$CONFIG_FILE" >/dev/null 2>&1; then
-    config_normalize "$(cat "$CONFIG_FILE")"
-  else
-    config_min_template
-  fi
+  local raw_json
+  raw_json="$(json_file_load_or_fallback "$CONFIG_FILE" "$(config_min_template)")"
+  config_normalize "$raw_json"
 }
 
 config_ensure_exists() {
@@ -1482,17 +1508,12 @@ USER_DB_FILE="/etc/sing-box-manager/user-manager.json"
 META_FILE="/etc/sing-box-manager/meta.json"
 
 meta_load() {
-  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
-    cat "$META_FILE"
-  else
-    echo '{}'
-  fi
+  json_file_load_or_fallback "$META_FILE" '{}'
 }
 
 meta_save() {
   local meta_json="$1"
-  mkdir -p "$(dirname "$META_FILE")"
-  echo "$meta_json" | jq . > "$META_FILE"
+  json_file_save_pretty "$META_FILE" "$meta_json"
 }
 
 meta_set_reality_public_key() {
@@ -1697,17 +1718,12 @@ user_db_exists() {
 }
 
 user_db_load() {
-  if user_db_exists; then
-    cat "$USER_DB_FILE"
-  else
-    user_db_min_template
-  fi
+  json_file_load_or_fallback "$USER_DB_FILE" "$(user_db_min_template)" '.enabled == true and (.users.admin != null)'
 }
 
 user_db_save() {
   local db_json="$1"
-  mkdir -p "$(dirname "$USER_DB_FILE")" /etc/sing-box
-  echo "$db_json" | jq . > "$USER_DB_FILE"
+  json_file_save_pretty "$USER_DB_FILE" "$db_json" /etc/sing-box
 }
 
 format_bytes_human() {
