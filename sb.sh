@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.44"
+SCRIPT_VERSION="4.1.45"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -665,13 +665,20 @@ source "${SCRIPT_LIB_DIR}/export.sh"
 user_manage_permission_menu_override() {
   local db_json="$1" username="$2" json="$3"
   db_json="$db_json"
-  local current_nodes_json
+  local current_nodes_json available_json
   local nodes=() node i raw picks=() invalid=0 sel idx selected_json new_db
 
   clear >&2
   print_rect_title "节点权限" >&2
   show_user_status_table "$db_json" >&2
-  current_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" '(.users[$u].nodes // []) | unique')"
+  available_json="$(list_all_node_keys "$json" | jq -R . | jq -s '.')"
+  current_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" --argjson available "$available_json" '
+    (.users[$u].nodes // []) as $nodes
+    | if ($available | length) > 0
+      then ($nodes | map(select(($available | index(.)) != null)) | unique)
+      else ($nodes | unique)
+      end
+  ')"
 
   ui_echo "当前权限类型：自定义节点"
   ui_echo "当前已分配节点："
@@ -722,10 +729,18 @@ user_manage_permission_menu_override() {
 user_show_info_override() {
   local db_json="$1" username="$2"
   local used_up used_down manual_added total_used quota_bytes used_up_text used_down_text manual_text total_text quota_text
-  local effective_nodes_json
+  local effective_nodes_json json available_json
   sync_user_usage_counters || true
   db_json="$(user_db_load)"
-  effective_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" '(.users[$u].nodes // []) | unique')"
+  json="$(config_load)"
+  available_json="$(list_all_node_keys "$json" | jq -R . | jq -s '.')"
+  effective_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" --argjson available "$available_json" '
+    (.users[$u].nodes // []) as $nodes
+    | if ($available | length) > 0
+      then ($nodes | map(select(($available | index(.)) != null)) | unique)
+      else ($nodes | unique)
+      end
+  ')"
   used_up="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_up_bytes // 0')"
   used_down="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_down_bytes // 0')"
   manual_added="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].manual_added_bytes // 0')"
