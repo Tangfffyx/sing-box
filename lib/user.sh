@@ -867,14 +867,10 @@ select_nodes_multi() {
 user_show_info() {
   local db_json="$1" username="$2"
   local used_up used_down manual_added total_used quota_bytes used_up_text used_down_text manual_text total_text quota_text
-  local json available_json effective_nodes_json
+  local effective_nodes_json
   sync_user_usage_counters || true
   db_json="$(user_db_load)"
-  json="$(config_load)"
-  available_json="$(list_all_node_keys "$json" | jq -R . | jq -s '.')"
-  effective_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" --argjson available "$available_json" '
-    (.users[$u].nodes // []) | map(select(($available | index(.)) != null)) | unique
-  ')"
+  effective_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" '(.users[$u].nodes // []) | unique')"
   used_up="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_up_bytes // 0')"
   used_down="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].used_down_bytes // 0')"
   manual_added="$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].manual_added_bytes // 0')"
@@ -952,16 +948,13 @@ user_add_menu() {
 user_manage_permission_menu() {
   local db_json="$1" username="$2" json="$3"
   db_json="$db_json"
-  local current_nodes_json available_json
+  local current_nodes_json
   local nodes=() node i raw picks=() invalid=0 sel idx selected_json new_db
 
   clear >&2
   print_rect_title "节点权限" >&2
   show_user_status_table "$db_json" >&2
-  available_json="$(list_all_node_keys "$json" | jq -R . | jq -s '.')"
-  current_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" --argjson available "$available_json" '
-    (.users[$u].nodes // []) | map(select(($available | index(.)) != null)) | unique
-  ')"
+  current_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" '(.users[$u].nodes // []) | unique')"
 
   ui_echo "当前权限类型：自定义节点"
   ui_echo "当前已分配节点："
@@ -973,7 +966,7 @@ user_manage_permission_menu() {
   fi
   ui_echo "${B}--------------------------------------------------------${NC}"
 
-  mapfile -t nodes < <(echo "$available_json" | jq -r '.[]?')
+  mapfile -t nodes < <(list_all_node_keys "$json")
   ui_echo "可选节点："
   i=1
   for node in "${nodes[@]}"; do
