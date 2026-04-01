@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.38"
+SCRIPT_VERSION="4.1.39"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -1736,6 +1736,7 @@ protocol_remove_menu() {
   local json="$1"
   local lines=() choice_arr updated_json="$json" c entry_key related sel
   local before_nodes_json after_nodes_json removed_nodes_json
+  local -a selected_entry_keys=()
   before_nodes_json="$(list_all_node_keys "$json" | jq -R . | jq -s '.')"
   mapfile -t lines < <(protocol_entry_table "$json")
   if [ ${#lines[@]} -eq 0 ]; then
@@ -1765,6 +1766,7 @@ ${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
 
   for c in "${choice_arr[@]}"; do
     IFS=$'	' read -r entry_key _ <<< "${lines[$((c-1))]}"
+    selected_entry_keys+=("$entry_key")
     related="$(relay_list_table "$updated_json" | awk -F '	' -v ek="$entry_key" '{u=$2; sub(/@.*/, "", u)} $1 == ek {print u}' | awk 'NF' | sort -u)" || {
       err "读取关联中转失败，已中止卸载。"
       pause
@@ -1797,6 +1799,9 @@ ${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
     after_nodes_json="$(list_all_node_keys "$updated_json" | jq -R . | jq -s '.')"
     removed_nodes_json="$(jq -cn --argjson before "$before_nodes_json" --argjson after "$after_nodes_json" '
       [ $before[] | select(($after | index(.)) == null) ] | unique
+    ')"
+    removed_nodes_json="$(jq -cn --argjson diff "$removed_nodes_json" --argjson selected "$(printf '%s\n' "${selected_entry_keys[@]}" | awk 'NF' | jq -R . | jq -s '.')" '
+      ($diff + $selected) | unique
     ')"
     db_json="$(user_db_load)"
     db_json="$(echo "$db_json" | jq --argjson removed "$removed_nodes_json" '
