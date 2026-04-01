@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.14"
+SCRIPT_VERSION="4.1.15"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -3976,16 +3976,24 @@ upsert_inbound_for_entry_key() {
 }
 
 prompt_protocol_port_and_entry_key() {
-  local proto="$1" prompt="$2" default_port="$3" json="$4" port_var="$5" entry_var="$6" conflict_msg="${7:-端口 %s 已被占用，请更换。}"
-  local prompt_port prompt_entry_key conflict_line
+  local proto="$1" prompt="$2" default_port="$3" json="$4" port_var="$5" entry_var="$6" conflict_msg="${7:-端口 %s 已被占用，请更换。}" allow_replace="${8:-1}"
+  local prompt_port prompt_entry_key conflict_line exclude_tag
 
   ask_port_or_return "$prompt" "$default_port" prompt_port || return 1
   prompt_entry_key="$(entry_key_from_parts "$proto" "$prompt_port")" || return 1
-  while port_conflict_for_protocol "$json" "$proto" "$prompt_port" "$prompt_entry_key"; do
+  if [ "$allow_replace" = "1" ]; then
+    exclude_tag="$prompt_entry_key"
+  else
+    exclude_tag=""
+  fi
+  while port_conflict_for_protocol "$json" "$proto" "$prompt_port" "$exclude_tag"; do
     printf -v conflict_line "$conflict_msg" "$prompt_port"
     warn "$conflict_line"
     ask_port_or_return "$prompt" "$default_port" prompt_port || return 1
     prompt_entry_key="$(entry_key_from_parts "$proto" "$prompt_port")" || return 1
+    if [ "$allow_replace" = "1" ]; then
+      exclude_tag="$prompt_entry_key"
+    fi
   done
 
   printf -v "$port_var" '%s' "$prompt_port"
@@ -4015,9 +4023,11 @@ protocol_tls_label() {
 
 install_standard_protocol_inbound() {
   local json="$1" proto="$2" prompt="$3" default_port="$4" conflict_msg="$5" out_json_var="$6" out_entry_key_var="$7"
-  local local_port local_entry_key tls_label sni inbound updated
+  local local_port local_entry_key tls_label sni inbound updated allow_replace="1"
 
-  prompt_protocol_port_and_entry_key "$proto" "$prompt" "$default_port" "$json" local_port local_entry_key "$conflict_msg" || return 1
+  [ "$proto" = "tuic" ] && allow_replace="0"
+
+  prompt_protocol_port_and_entry_key "$proto" "$prompt" "$default_port" "$json" local_port local_entry_key "$conflict_msg" "$allow_replace" || return 1
   tls_label="$(protocol_tls_label "$proto")"
   if [ -n "$tls_label" ]; then
     sni="$(choose_tls_domain "$tls_label")" || return 1
@@ -4101,7 +4111,7 @@ protocol_install_menu() {
         added_node_keys+=("$entry_key")
         ;;
       3)
-        install_standard_protocol_inbound "$updated_json" "shadowsocks" "Shadowsocks 监听端口 (默认: 8080): " "8080" "端口 %s 已被同层协议占用，请更换。" updated_json entry_key \
+        install_standard_protocol_inbound "$updated_json" "shadowsocks" "Shadowsocks 监听端口 (默认: 8080): " "8080" "端口 %s 已被占用，请更换。" updated_json entry_key \
           || { warn "已返回上一级。"; pause; return 0; }
         added_node_keys+=("$entry_key")
         ;;
@@ -4129,7 +4139,7 @@ protocol_install_menu() {
         added_node_keys+=("$entry_key")
         ;;
       7)
-        install_standard_protocol_inbound "$updated_json" "tuic" "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" "端口 %s 已被其它 TUIC 占用，请更换。" updated_json entry_key \
+        install_standard_protocol_inbound "$updated_json" "tuic" "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" "端口 %s 已被占用，请更换。" updated_json entry_key \
           || { warn "已返回上一级。"; pause; return 0; }
         added_node_keys+=("$entry_key")
         ;;
