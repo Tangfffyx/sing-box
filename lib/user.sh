@@ -294,7 +294,6 @@ user_db_min_template() {
       "last_reset_period": "",
       "reset_day": 0,
       "expire_at": "0",
-      "allow_all_nodes": false,
       "nodes": []
     }
   }
@@ -728,11 +727,11 @@ user_db_materialize_allow_all_nodes() {
   echo "$db_json" | jq --argjson available "$available_json" '
     .users |= with_entries(
       if (.value.allow_all_nodes // false) == true then
-        .value.allow_all_nodes = false
-        | .value.nodes = $available
+        .value.nodes = $available
       else
         .
       end
+      | .value |= del(.allow_all_nodes)
     )
   '
 }
@@ -751,6 +750,7 @@ user_db_cleanup_missing_nodes() {
         | map(select(($available | index(.)) != null))
         | unique
       )
+      | .value |= del(.allow_all_nodes)
     )
   '
 }
@@ -902,7 +902,7 @@ user_show_info() {
 }
 
 user_add_menu() {
-  local db_json json username quota reset_day expire_at ans nodes_json allow_all_json
+  local db_json json username quota reset_day expire_at ans nodes_json
   db_json="$(user_db_load)"
   json="$(config_load)"
   clear
@@ -925,9 +925,8 @@ user_add_menu() {
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
-  allow_all_json='false'
   nodes_json='[]'
-  db_json="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson allow "$allow_all_json" --argjson nodes "$nodes_json" '
+  db_json="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson nodes "$nodes_json" '
     .users[$u] = {
       enabled: true,
       quota_gb: $quota,
@@ -939,7 +938,6 @@ user_add_menu() {
       last_reset_period: "",
       reset_day: $reset,
       expire_at: $expire,
-      allow_all_nodes: $allow,
       nodes: $nodes
     }
   ')"
@@ -975,8 +973,7 @@ user_manage_permission_menu() {
 
   mapfile -t nodes < <(list_all_node_keys "$json")
   ui_echo "可选节点："
-  ui_echo "  1. 当前全部节点（静态快照）"
-  i=2
+  i=1
   for node in "${nodes[@]}"; do
     ui_echo "  ${i}. ${node}"
     i=$((i+1))
@@ -988,7 +985,7 @@ user_manage_permission_menu() {
 
   for sel in "${picks[@]}"; do
     if ! [[ "$sel" =~ ^[0-9]+$ ]]; then invalid=1; break; fi
-    if [ "$sel" -lt 1 ] || [ "$sel" -gt $(( ${#nodes[@]} + 1 )) ]; then invalid=1; break; fi
+    if [ "$sel" -lt 1 ] || [ "$sel" -gt "${#nodes[@]}" ]; then invalid=1; break; fi
   done
 
   if [ $invalid -eq 1 ]; then
@@ -997,24 +994,16 @@ user_manage_permission_menu() {
     return 1
   fi
 
-  if printf '%s
-' "${picks[@]}" | grep -qx '1'; then
-    selected_json="$(printf '%s\n' "${nodes[@]}" | awk 'NF' | LC_ALL=C sort -u | jq -R . | jq -s '.')"
-    new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].allow_all_nodes = false | .users[$u].nodes = $nodes')"
-    echo "$new_db"
-    return 0
-  fi
-
   selected_json="$({
     for sel in "${picks[@]}"; do
-      idx=$((sel-2))
+      idx=$((sel-1))
       if [ $idx -ge 0 ] && [ $idx -lt ${#nodes[@]} ]; then
         echo "${nodes[$idx]}"
       fi
     done
   } | awk 'NF' | LC_ALL=C sort -u | jq -R . | jq -s '.')"
 
-  new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].allow_all_nodes = false | .users[$u].nodes = $nodes')"
+  new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].nodes = $nodes | .users[$u] |= del(.allow_all_nodes)')"
   echo "$new_db"
 }
 
