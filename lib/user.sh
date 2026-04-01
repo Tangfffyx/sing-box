@@ -294,7 +294,7 @@ user_db_min_template() {
       "last_reset_period": "",
       "reset_day": 0,
       "expire_at": "0",
-      "allow_all_nodes": true,
+      "allow_all_nodes": false,
       "nodes": []
     }
   }
@@ -409,7 +409,7 @@ user_db_user_is_enabled() {
 user_db_user_allow_node() {
   local db_json="$1" username="$2" node_key="$3"
   echo "$db_json" | jq -e --arg u "$username" --arg n "$node_key" '
-    (.users[$u].allow_all_nodes == true) or ((.users[$u].nodes // []) | index($n) != null)
+    ((.users[$u].nodes // []) | index($n) != null)
   ' >/dev/null 2>&1
 }
 
@@ -719,7 +719,7 @@ filter_disabled_auth_users() {
   '
 }
 
-user_db_cleanup_missing_nodes() {
+user_db_materialize_allow_all_nodes() {
   local db_json="$1" json="$2"
   local available_json
   available_json="$(
@@ -733,7 +733,19 @@ user_db_cleanup_missing_nodes() {
       else
         .
       end
-      |
+    )
+  '
+}
+
+user_db_cleanup_missing_nodes() {
+  local db_json="$1" json="$2"
+  db_json="$(user_db_materialize_allow_all_nodes "$db_json" "$json")" || return 1
+  local available_json
+  available_json="$(
+    list_all_node_keys "$json" | jq -R . | jq -s '.'
+  )"
+  echo "$db_json" | jq --argjson available "$available_json" '
+    .users |= with_entries(
       .value.nodes = (
         (.value.nodes // [])
         | map(select(($available | index(.)) != null))
@@ -768,6 +780,7 @@ user_manager_apply_changes() {
 
   say "重新生成用户节点关系..."
   db_json="$(user_db_load)"
+  db_json="$(user_db_materialize_allow_all_nodes "$db_json" "$base_json")" || return 1
   if [ "$skip_node_cleanup" != "1" ]; then
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
   fi
