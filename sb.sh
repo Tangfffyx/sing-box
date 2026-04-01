@@ -31,7 +31,8 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.7"
+SCRIPT_VERSION="4.1.8"
+AUTO_SYNC_SCRIPT_ENTRYPOINTS="0"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -3259,6 +3260,12 @@ download_remote_script_to_target() {
 }
 
 sync_runtime_script_entrypoints() {
+  if [ "${AUTO_SYNC_SCRIPT_ENTRYPOINTS:-0}" != "1" ]; then
+    [ -s "$SB_TARGET_SCRIPT" ] || install_script_self >/dev/null 2>&1 || true
+    install_sb_shortcut >/dev/null 2>&1 || true
+    return 0
+  fi
+
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
   local resolved current_ver target_ver
   resolved="$(readlink -f "$current" 2>/dev/null || echo "$current")"
