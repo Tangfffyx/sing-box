@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.7"
+SCRIPT_VERSION="4.1.8"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -3951,6 +3951,32 @@ normalize_takeover(){
   pause
 }
 
+upsert_inbound_for_entry_key() {
+  local json="$1" entry_key="$2" inbound_json="$3"
+  echo "$json" | jq --arg ek "$entry_key" --argjson inb "$inbound_json" '
+    .inbounds |= map(select(.tag != $ek))
+    | .inbounds += [$inb]
+  '
+}
+
+prompt_protocol_port_and_entry_key() {
+  local proto="$1" prompt="$2" default_port="$3" json="$4" port_var="$5" entry_var="$6" conflict_msg="${7:-端口 %s 已被占用，请更换。}"
+  local port entry_key conflict_line
+
+  ask_port_or_return "$prompt" "$default_port" port || return 1
+  entry_key="$(entry_key_from_parts "$proto" "$port")" || return 1
+  while port_conflict_for_protocol "$json" "$proto" "$port" "$entry_key"; do
+    printf -v conflict_line "$conflict_msg" "$port"
+    warn "$conflict_line"
+    ask_port_or_return "$prompt" "$default_port" port || return 1
+    entry_key="$(entry_key_from_parts "$proto" "$port")" || return 1
+  done
+
+  printf -v "$port_var" '%s' "$port"
+  printf -v "$entry_var" '%s' "$entry_key"
+  return 0
+}
+
 protocol_install_menu() {
   local json="$1"
   local updated_json="$json"
@@ -3982,13 +4008,8 @@ protocol_install_menu() {
   for c in "${choice_arr[@]}"; do
     case "$c" in
       1)
-        ask_port_or_return "Reality 监听端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts vless-reality "$port")"
-        while port_conflict_for_protocol "$updated_json" vless-reality "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "Reality 监听端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts vless-reality "$port")"
-        done
+        prompt_protocol_port_and_entry_key "vless-reality" "Reality 监听端口 (默认: 443): " "443" "$updated_json" port entry_key \
+          || { warn "已返回上一级。"; pause; return 0; }
         read -r -p "Private Key（回车自动生成）: " priv
         pub=""
         if [ -z "$priv" ]; then
@@ -4013,7 +4034,7 @@ protocol_install_menu() {
         fi
         sni="$(choose_tls_domain "Reality")" || return 0
         inbound="$(build_vless_reality_inbound "$port" "$sni" "$priv" "$sid")"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         if [ -n "$pub" ]; then
           reality_meta_tags+=("$entry_key")
@@ -4021,82 +4042,52 @@ protocol_install_menu() {
         fi
         ;;
       2)
-        ask_port_or_return "AnyTLS 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts anytls "$port")"
-        while port_conflict_for_protocol "$updated_json" anytls "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "AnyTLS 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts anytls "$port")"
-        done
+        prompt_protocol_port_and_entry_key "anytls" "AnyTLS 端口 (默认: 443): " "443" "$updated_json" port entry_key \
+          || { warn "已返回上一级。"; pause; return 0; }
         sni="$(choose_tls_domain "AnyTLS")" || return 0
         inbound="$(build_anytls_inbound "$port" "$sni")"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
       3)
-        ask_port_or_return "Shadowsocks 监听端口 (默认: 8080): " "8080" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts shadowsocks "$port")"
-        while port_conflict_for_protocol "$updated_json" shadowsocks "$port" "$entry_key"; do
-          warn "端口 ${port} 已被同层协议占用，请更换。"
-          ask_port_or_return "Shadowsocks 监听端口 (默认: 8080): " "8080" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts shadowsocks "$port")"
-        done
+        prompt_protocol_port_and_entry_key "shadowsocks" "Shadowsocks 监听端口 (默认: 8080): " "8080" "$updated_json" port entry_key "端口 %s 已被同层协议占用，请更换。" \
+          || { warn "已返回上一级。"; pause; return 0; }
         inbound="$(build_ss_inbound "$port")"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
       4)
-        ask_port_or_return "Trojan 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts trojan "$port")"
-        while port_conflict_for_protocol "$updated_json" trojan "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "Trojan 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts trojan "$port")"
-        done
+        prompt_protocol_port_and_entry_key "trojan" "Trojan 端口 (默认: 443): " "443" "$updated_json" port entry_key \
+          || { warn "已返回上一级。"; pause; return 0; }
         sni="$(choose_tls_domain "Trojan")" || return 0
         inbound="$(build_trojan_inbound "$port" "$sni")"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
       5)
         read -r -p "vmess-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
-        ask_port_or_return "vmess-ws 监听端口 (默认: 8001): " "8001" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts vmess-ws "$port")"
-        while port_conflict_for_protocol "$updated_json" vmess-ws "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "vmess-ws 监听端口 (默认: 8001): " "8001" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts vmess-ws "$port")"
-        done
+        prompt_protocol_port_and_entry_key "vmess-ws" "vmess-ws 监听端口 (默认: 8001): " "8001" "$updated_json" port entry_key \
+          || { warn "已返回上一级。"; pause; return 0; }
         read -r -p "WS Path (回车随机生成): " path; path="$(normalize_ws_path "${path:-}")"
         inbound="$(build_vmess_ws_inbound "$port" "$listen" "$path")"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
       6)
         read -r -p "vless-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
-        ask_port_or_return "vless-ws 监听端口 (默认: 8002): " "8002" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts vless-ws "$port")"
-        while port_conflict_for_protocol "$updated_json" vless-ws "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "vless-ws 监听端口 (默认: 8002): " "8002" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts vless-ws "$port")"
-        done
+        prompt_protocol_port_and_entry_key "vless-ws" "vless-ws 监听端口 (默认: 8002): " "8002" "$updated_json" port entry_key \
+          || { warn "已返回上一级。"; pause; return 0; }
         read -r -p "WS Path (回车随机生成): " path; path="$(normalize_ws_path "${path:-}")"
         inbound="$(build_vless_ws_inbound "$port" "$listen" "$path")"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
       7)
-        ask_port_or_return "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts tuic "$port")"
-        while port_conflict_for_protocol "$updated_json" tuic "$port" "$entry_key"; do
-          warn "端口 ${port} 已被其它 TUIC 占用，请更换。"
-          ask_port_or_return "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts tuic "$port")"
-        done
+        prompt_protocol_port_and_entry_key "tuic" "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" "$updated_json" port entry_key "端口 %s 已被其它 TUIC 占用，请更换。" \
+          || { warn "已返回上一级。"; pause; return 0; }
         sni="$(choose_tls_domain "TUIC")" || return 0
         inbound="$(build_tuic_inbound "$port" "$sni")"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
     esac
