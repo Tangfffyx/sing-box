@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.30"
+SCRIPT_VERSION="4.1.31"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -894,6 +894,19 @@ config_force_access_log_settings() {
 
 # shellcheck source=lib/cron.sh
 source "${SCRIPT_LIB_DIR}/cron.sh"
+
+reload_runtime_modules() {
+  # shellcheck source=lib/config.sh
+  source "${SCRIPT_LIB_DIR}/config.sh" || return 1
+  # shellcheck source=lib/protocol.sh
+  source "${SCRIPT_LIB_DIR}/protocol.sh" || return 1
+  # shellcheck source=lib/user.sh
+  source "${SCRIPT_LIB_DIR}/user.sh" || return 1
+  # shellcheck source=lib/export.sh
+  source "${SCRIPT_LIB_DIR}/export.sh" || return 1
+  # shellcheck source=lib/cron.sh
+  source "${SCRIPT_LIB_DIR}/cron.sh" || return 1
+}
 
 remove_all_singbox_service_units() {
   say "清理 sing-box service（包含官方残留）..."
@@ -1801,6 +1814,7 @@ view_config_formatted() {
 main_menu() {
   ensure_sb_shortcut >/dev/null 2>&1 || true
   while true; do
+    reload_runtime_modules >/dev/null 2>&1 || true
     clear
     print_rect_title "Sing-box Elite 管理系统  V${SCRIPT_VERSION}"
     echo -e "  ${C}1.${NC} 安装/更新 sing-box"
