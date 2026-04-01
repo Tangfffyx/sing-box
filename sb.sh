@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.43"
+SCRIPT_VERSION="4.1.44"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -1722,8 +1722,6 @@ protocol_install_menu() {
 protocol_remove_menu() {
   local json="$1"
   local lines=() choice_arr updated_json="$json" c entry_key related sel
-  local removed_nodes_json
-  local -a selected_entry_keys=()
   mapfile -t lines < <(protocol_entry_table "$json")
   if [ ${#lines[@]} -eq 0 ]; then
     warn "当前没有可卸载的核心模块。"
@@ -1752,7 +1750,6 @@ ${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
 
   for c in "${choice_arr[@]}"; do
     IFS=$'	' read -r entry_key _ <<< "${lines[$((c-1))]}"
-    selected_entry_keys+=("$entry_key")
     related="$(relay_list_table "$updated_json" | awk -F '	' -v ek="$entry_key" '{u=$2; sub(/@.*/, "", u)} $1 == ek {print u}' | awk 'NF' | sort -u)" || {
       err "读取关联中转失败，已中止卸载。"
       pause
@@ -1782,13 +1779,7 @@ ${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
   }
   if user_db_exists; then
     local db_json
-    removed_nodes_json="$(printf '%s\n' "${selected_entry_keys[@]}" | awk 'NF' | LC_ALL=C sort -u | jq -R . | jq -s '.')"
     db_json="$(user_db_load)"
-    db_json="$(echo "$db_json" | jq --argjson removed "$removed_nodes_json" '
-      .users |= with_entries(
-        .value.nodes = (((.value.nodes // []) | map(select(($removed | index(.)) == null))) | unique)
-      )
-    ')"
     if ! user_manager_apply_changes "$db_json" "$updated_json" "1"; then
       warn "核心模块卸载失败，已返回上一级。"
     fi
