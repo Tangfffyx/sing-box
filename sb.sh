@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.25"
+SCRIPT_VERSION="4.1.26"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -1672,7 +1672,7 @@ ${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
         .value.nodes = (((.value.nodes // []) | map(select(($removed | index(.)) == null))) | unique)
       )
     ')"
-    if ! user_manager_apply_changes "$db_json" "$updated_json"; then
+    if ! user_manager_apply_changes "$db_json" "$updated_json" "1"; then
       warn "核心模块卸载失败，已返回上一级。"
     fi
   else
