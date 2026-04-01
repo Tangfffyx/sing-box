@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.9"
+SCRIPT_VERSION="4.1.10"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -1623,33 +1623,28 @@ choose_tls_domain() {
       echo "$manual"
       ;;
     2)
-      picked="$(auto_pick_tls_domain 2>/dev/null || true)"
-      if [ -n "$picked" ]; then
-        picked_ms="${picked#*$'\t'}"
-        picked="${picked%%$'\t'*}"
-        echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
-        echo "$picked"
-      else
-        warn "自动测速失败，已返回上一级。" >&2
-        pause >&2
-        return 1
-      fi
+      choose_tls_domain_auto || return 1
       ;;
     *)
       warn "输入无效，已使用默认自动测速。" >&2
-      picked="$(auto_pick_tls_domain 2>/dev/null || true)"
-      if [ -n "$picked" ]; then
-        picked_ms="${picked#*$'\t'}"
-        picked="${picked%%$'\t'*}"
-        echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
-        echo "$picked"
-      else
-        warn "自动测速失败，已返回上一级。" >&2
-        pause >&2
-        return 1
-      fi
+      choose_tls_domain_auto || return 1
       ;;
   esac
+}
+
+choose_tls_domain_auto() {
+  local picked picked_ms
+  picked="$(auto_pick_tls_domain 2>/dev/null || true)"
+  if [ -n "$picked" ]; then
+    picked_ms="${picked#*$'\t'}"
+    picked="${picked%%$'\t'*}"
+    echo -e "已自动选择域名：${picked}（${picked_ms} ms）" >&2
+    echo "$picked"
+    return 0
+  fi
+  warn "自动测速失败，已返回上一级。" >&2
+  pause >&2
+  return 1
 }
 
 user_node_part() {
