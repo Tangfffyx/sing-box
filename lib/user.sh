@@ -774,17 +774,11 @@ user_manager_apply_changes() {
   local db_json="$1" base_json="${2:-}" skip_node_cleanup="${3:-0}"
   [ -n "$base_json" ] || base_json="$(config_load)"
 
-  say "更新用户数据库..."
-  user_db_save "$db_json"
-  ok "用户数据库已保存。"
-
   say "重新生成用户节点关系..."
-  db_json="$(user_db_load)"
   db_json="$(user_db_materialize_allow_all_nodes "$db_json" "$base_json")" || return 1
   if [ "$skip_node_cleanup" != "1" ]; then
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
   fi
-  user_db_save "$db_json"
   local applied_json
   applied_json="$(user_manager_apply_to_json "$base_json" "$db_json")" || {
     err "生成用户节点关系失败。"
@@ -796,6 +790,9 @@ user_manager_apply_changes() {
   ok "路由规则已重建。"
 
   if config_apply "$applied_json"; then
+    say "更新用户数据库..."
+    user_db_save "$db_json"
+    ok "用户数据库已保存。"
     ok "用户变更已应用。"
     return 0
   fi

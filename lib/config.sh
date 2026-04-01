@@ -146,12 +146,13 @@ config_apply() {
     return 1
   fi
 
-  if ! sing-box check -c "$TEMP_FILE" >/dev/null 2>&1; then
+  local check_output
+  check_output="$(sing-box check -c "$TEMP_FILE" 2>&1)" || {
     err "sing-box check 校验未通过，未写入配置。"
-    sing-box check -c "$TEMP_FILE" 2>&1 | sed 's/^/  /'
+    printf '%s\n' "$check_output" | sed 's/^/  /'
     rm -f "$TEMP_FILE"
     return 1
-  fi
+  }
 
   local ts backup prev_tmp
   ts="$(date +%Y%m%d_%H%M%S)"
@@ -200,4 +201,3 @@ init_manager_env() {
   has_cmd systemctl || { err "未找到 systemctl。"; exit 1; }
   config_ensure_exists
 }
-
