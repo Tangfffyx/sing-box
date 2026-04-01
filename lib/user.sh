@@ -869,7 +869,6 @@ user_show_info() {
   local used_up used_down manual_added total_used quota_bytes used_up_text used_down_text manual_text total_text quota_text
   local json available_json effective_nodes_json
   sync_user_usage_counters || true
-  user_db_cleanup_current_and_save || true
   db_json="$(user_db_load)"
   json="$(config_load)"
   available_json="$(list_all_node_keys "$json" | jq -R . | jq -s '.')"
@@ -952,12 +951,7 @@ user_add_menu() {
 
 user_manage_permission_menu() {
   local db_json="$1" username="$2" json="$3"
-  local cleaned_db_json
-  cleaned_db_json="$(user_db_cleanup_missing_nodes "$db_json" "$json")" || cleaned_db_json="$db_json"
-  if [ "$(echo "$cleaned_db_json" | jq -c . 2>/dev/null)" != "$(echo "$db_json" | jq -c . 2>/dev/null)" ]; then
-    user_db_save "$cleaned_db_json"
-  fi
-  db_json="$cleaned_db_json"
+  db_json="$db_json"
   local current_nodes_json available_json
   local nodes=() node i raw picks=() invalid=0 sel idx selected_json new_db
 
@@ -1126,7 +1120,6 @@ user_manage_single() {
   local username="$1"
   local db_json json act new_db
   while true; do
-    user_db_cleanup_current_and_save || true
     db_json="$(user_db_load)"
     json="$(config_load)"
     clear
