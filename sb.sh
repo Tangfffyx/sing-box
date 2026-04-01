@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.51"
+SCRIPT_VERSION="4.1.52"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -1788,6 +1788,11 @@ ${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
 
   updated_json="$(route_rebuild "$updated_json")" || {
     err "重建路由失败，已中止，未写入配置。"
+    pause
+    return 1
+  }
+  updated_json="$(ensure_v2ray_api_on_json "$updated_json")" || {
+    err "重建 v2ray_api 统计用户失败，已中止，未写入配置。"
     pause
     return 1
   }
