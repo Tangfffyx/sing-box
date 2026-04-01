@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.10"
+SCRIPT_VERSION="4.1.11"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -2878,6 +2878,22 @@ url_encode() {
   printf '%s' "${1:-}" | jq -sRr @uri
 }
 
+build_encoded_query() {
+  local out="" key val sep=""
+  while [ "$#" -ge 2 ]; do
+    key="$1"; val="$2"
+    out="${out}${sep}${key}=$(url_encode "$val")"
+    sep="&"
+    shift 2
+  done
+  printf '%s' "$out"
+}
+
+append_link_name_fragment() {
+  local base="$1" name="$2"
+  printf '%s#%s' "$base" "$(url_encode "$name")"
+}
+
 build_v2rayn_ss_link() {
   local server="$1" port="$2" method="$3" password="$4" name="$5"
   local userinfo enc
@@ -2909,46 +2925,51 @@ build_v2rayn_vmess_ws_link() {
 
 build_v2rayn_vless_reality_link() {
   local server="$1" port="$2" uuid="$3" sni="$4" pbk="$5" sid="$6" flow="$7" name="$8"
-  printf 'vless://%s@%s:%s?encryption=none&flow=%s&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s' \
-    "$uuid" "$server" "$port" \
-    "$(url_encode "$flow")" \
-    "$(url_encode "$sni")" \
-    "$(url_encode "$pbk")" \
-    "$(url_encode "$sid")" \
-    "$(url_encode "$name")"
+  local query
+  query="$(build_encoded_query \
+    encryption "none" \
+    flow "$flow" \
+    security "reality" \
+    sni "$sni" \
+    fp "chrome" \
+    pbk "$pbk" \
+    sid "$sid" \
+    type "tcp")"
+  append_link_name_fragment "vless://${uuid}@${server}:${port}?${query}" "$name"
 }
 
 build_v2rayn_vless_ws_link() {
   local server="$1" uuid="$2" host="$3" path="$4" name="$5"
-  printf 'vless://%s@%s:443?encryption=none&security=tls&sni=%s&type=ws&host=%s&path=%s#%s' \
-    "$uuid" "$server" \
-    "$(url_encode "$host")" \
-    "$(url_encode "$host")" \
-    "$(url_encode "$path")" \
-    "$(url_encode "$name")"
+  local query
+  query="$(build_encoded_query \
+    encryption "none" \
+    security "tls" \
+    sni "$host" \
+    type "ws" \
+    host "$host" \
+    path "$path")"
+  append_link_name_fragment "vless://${uuid}@${server}:443?${query}" "$name"
 }
 
 build_v2rayn_anytls_link() {
   local server="$1" port="$2" password="$3" sni="$4" name="$5"
-  printf 'anytls://%s@%s:%s?sni=%s&fp=chrome&alpn=%s&allowInsecure=1#%s' \
-    "$(url_encode "$password")" "$server" "$port" \
-    "$(url_encode "$sni")" \
-    "$(url_encode "h2,http/1.1")" \
-    "$(url_encode "$name")"
+  local query
+  query="$(build_encoded_query sni "$sni" fp "chrome" alpn "h2,http/1.1" allowInsecure "1")"
+  append_link_name_fragment "anytls://$(url_encode "$password")@${server}:${port}?${query}" "$name"
 }
 
 build_v2rayn_trojan_link() {
   local server="$1" port="$2" password="$3" sni="$4" name="$5"
-  printf 'trojan://%s@%s:%s?security=tls&sni=%s&alpn=%s&allowInsecure=1#%s'     "$(url_encode "$password")" "$server" "$port"     "$(url_encode "$sni")"     "$(url_encode "h2,http/1.1")"     "$(url_encode "$name")"
+  local query
+  query="$(build_encoded_query security "tls" sni "$sni" alpn "h2,http/1.1" allowInsecure "1")"
+  append_link_name_fragment "trojan://$(url_encode "$password")@${server}:${port}?${query}" "$name"
 }
 
 build_v2rayn_tuic_link() {
   local server="$1" port="$2" uuid="$3" password="$4" sni="$5" name="$6"
-  printf 'tuic://%s:%s@%s:%s?sni=%s&alpn=%s&allow_insecure=1&congestion_control=bbr#%s' \
-    "$uuid" "$(url_encode "$password")" "$server" "$port" \
-    "$(url_encode "$sni")" \
-    "$(url_encode "h3")" \
-    "$(url_encode "$name")"
+  local query
+  query="$(build_encoded_query sni "$sni" alpn "h3" allow_insecure "1" congestion_control "bbr")"
+  append_link_name_fragment "tuic://${uuid}:$(url_encode "$password")@${server}:${port}?${query}" "$name"
 }
 
 export_collect_context() {
