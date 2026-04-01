@@ -3331,43 +3331,43 @@ config_force_access_log_settings() {
 }
 
 install_log_maintain_cron() {
-  has_cmd crontab || return 1
-  local tmp
-  tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${LOG_MAINTAIN_CRON_MARK}" > "$tmp" || true
-  echo "${LOG_MAINTAIN_CRON_SCHEDULE} bash ${SB_TARGET_SCRIPT} --maintain-logs >/dev/null 2>&1" >> "$tmp"
-  crontab "$tmp"
-  rm -f "$tmp"
+  install_managed_cron_job "$LOG_MAINTAIN_CRON_MARK" "$LOG_MAINTAIN_CRON_SCHEDULE" "--maintain-logs"
 }
 
 remove_log_maintain_cron() {
-  has_cmd crontab || return 0
-  local tmp
-  tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${LOG_MAINTAIN_CRON_MARK}" > "$tmp" || true
-  if [ -s "$tmp" ]; then
-    crontab "$tmp"
-  else
-    crontab -r 2>/dev/null || true
-  fi
-  rm -f "$tmp"
+  remove_managed_cron_job "$LOG_MAINTAIN_CRON_MARK"
 }
 
 install_user_watch_cron() {
+  install_managed_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "--user-watch"
+}
+
+remove_user_watch_cron() {
+  remove_managed_cron_job "$USER_WATCH_CRON_MARK"
+}
+
+build_managed_cron_command() {
+  local script_arg="$1"
+  printf 'bash %s %s >/dev/null 2>&1' "$SB_TARGET_SCRIPT" "$script_arg"
+}
+
+install_managed_cron_job() {
+  local mark="$1" schedule="$2" script_arg="$3"
   has_cmd crontab || return 1
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${USER_WATCH_CRON_MARK}" > "$tmp" || true
-  echo "${USER_WATCH_CRON_SCHEDULE} bash ${SB_TARGET_SCRIPT} --user-watch >/dev/null 2>&1" >> "$tmp"
+  crontab -l 2>/dev/null | grep -F -v "$mark" > "$tmp" || true
+  printf '%s %s\n' "$schedule" "$(build_managed_cron_command "$script_arg")" >> "$tmp"
   crontab "$tmp"
   rm -f "$tmp"
 }
 
-remove_user_watch_cron() {
+remove_managed_cron_job() {
+  local mark="$1"
   has_cmd crontab || return 0
   local tmp
   tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v "${USER_WATCH_CRON_MARK}" > "$tmp" || true
+  crontab -l 2>/dev/null | grep -F -v "$mark" > "$tmp" || true
   if [ -s "$tmp" ]; then
     crontab "$tmp"
   else
