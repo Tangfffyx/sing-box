@@ -22,7 +22,7 @@ TEMP_FILE="/etc/sing-box/config.json.tmp"
 SCRIPT_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
 SB_TARGET_SCRIPT="/root/sing-box.sh"
 SB_SHORTCUT="/usr/local/bin/s"
-REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/main/sb.sh"
+REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Tangfffyx/sing-box/refs/heads/codex/optimize-sb.sh-script/sb.sh"
 SINGBOX_RELEASE_REPO="Tangfffyx/sing-box"
 SINGBOX_INSTALL_DIR="/usr/local/bin"
 SINGBOX_BIN="${SINGBOX_INSTALL_DIR}/sing-box"
@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.6"
+SCRIPT_VERSION="4.1.7"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -3240,14 +3240,22 @@ script_version_of_file() {
 
 copy_running_script_to_target() {
   local current="${1:-${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}}"
-  local src
-  for src in "$current" "/proc/$$/fd/255" "/dev/fd/255"; do
-    [ -r "$src" ] || continue
-    if cat "$src" > "$SB_TARGET_SCRIPT" 2>/dev/null; then
-      return 0
-    fi
-  done
-  return 1
+  [ -r "$current" ] || return 1
+  cat "$current" > "$SB_TARGET_SCRIPT" 2>/dev/null
+}
+
+download_remote_script_to_target() {
+  local tmp
+  tmp="$(mktemp)"
+  curl -fsSL "$REMOTE_SCRIPT_URL" -o "$tmp" || {
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 1
+  }
+  mv -f "$tmp" "$SB_TARGET_SCRIPT" || {
+    rm -f "$tmp" >/dev/null 2>&1 || true
+    return 1
+  }
+  return 0
 }
 
 sync_runtime_script_entrypoints() {
@@ -3259,7 +3267,7 @@ sync_runtime_script_entrypoints() {
 
   if [[ "$resolved" == /dev/fd/* ]] || [[ "$resolved" == /proc/self/fd/* ]] || [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]]; then
     if [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; then
-      copy_running_script_to_target "$current" || true
+      download_remote_script_to_target || true
     fi
   else
     if [ "$resolved" != "$SB_TARGET_SCRIPT" ] && { [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; }; then
@@ -3275,16 +3283,10 @@ install_script_self() {
   mkdir -p /usr/local/bin
   local current="${SCRIPT_SELF:-${BASH_SOURCE[0]:-$0}}"
   if [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]] || [[ "$current" == /dev/fd/* ]] || [[ "$current" == /proc/self/fd/* ]]; then
-    if ! copy_running_script_to_target "$current"; then
-      if [ ! -s "$SB_TARGET_SCRIPT" ]; then
-        curl -Ls "$REMOTE_SCRIPT_URL" -o "$SB_TARGET_SCRIPT" || {
-          warn "快捷命令 s 安装失败：无法保存当前脚本到 $SB_TARGET_SCRIPT"
-          return 1
-        }
-      else
-        warn "当前会话来自管道执行，未能读取运行中脚本；已保留现有 $SB_TARGET_SCRIPT 不覆盖。"
-      fi
-    fi
+    download_remote_script_to_target || {
+      warn "快捷命令 s 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
+      return 1
+    }
   else
     current="$(readlink -f "$current" 2>/dev/null || echo "$current")"
     if [ "$current" != "$SB_TARGET_SCRIPT" ]; then
