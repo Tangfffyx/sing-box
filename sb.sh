@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.34"
+SCRIPT_VERSION="4.1.35"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -662,7 +662,7 @@ source "${SCRIPT_LIB_DIR}/user.sh"
 source "${SCRIPT_LIB_DIR}/export.sh"
 
 # 兼容兜底：即使加载到旧版 user.sh，也强制覆盖“节点权限”菜单为仅显式节点分配（无“全部节点”入口）
-user_manage_permission_menu() {
+user_manage_permission_menu_override() {
   local db_json="$1" username="$2" json="$3"
   local cleaned_db_json
   cleaned_db_json="$(user_db_cleanup_missing_nodes "$db_json" "$json")" || cleaned_db_json="$db_json"
@@ -723,6 +723,12 @@ user_manage_permission_menu() {
   new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].nodes = $nodes | .users[$u] |= del(.allow_all_nodes)')"
   echo "$new_db"
 }
+
+apply_user_menu_overrides() {
+  eval "$(declare -f user_manage_permission_menu_override | sed '1s/user_manage_permission_menu_override/user_manage_permission_menu/')"
+}
+
+apply_user_menu_overrides
 
 # ====================================================
 # 700 Installer / system tools
@@ -975,6 +981,7 @@ reload_runtime_modules() {
   source "${SCRIPT_LIB_DIR}/export.sh" || return 1
   # shellcheck source=lib/cron.sh
   source "${SCRIPT_LIB_DIR}/cron.sh" || return 1
+  apply_user_menu_overrides
 }
 
 remove_all_singbox_service_units() {
