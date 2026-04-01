@@ -775,8 +775,8 @@ user_manager_apply_changes() {
   [ -n "$base_json" ] || base_json="$(config_load)"
 
   say "重新生成用户节点关系..."
-  db_json="$(user_db_materialize_allow_all_nodes "$db_json" "$base_json")" || return 1
   if [ "$skip_node_cleanup" != "1" ]; then
+    db_json="$(user_db_materialize_allow_all_nodes "$db_json" "$base_json")" || return 1
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
   fi
   local applied_json
