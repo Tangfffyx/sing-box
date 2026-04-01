@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.49"
+SCRIPT_VERSION="4.1.50"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -772,7 +772,8 @@ user_show_info_override() {
 }
 
 apply_user_menu_overrides() {
-  return 0
+  eval "$(declare -f user_manage_permission_menu_override | sed '1s/user_manage_permission_menu_override/user_manage_permission_menu/')"
+  eval "$(declare -f user_show_info_override | sed '1s/user_show_info_override/user_show_info/')"
 }
 
 apply_user_menu_overrides
@@ -1027,6 +1028,7 @@ reload_runtime_modules() {
   source "${SCRIPT_LIB_DIR}/export.sh" || return 1
   # shellcheck source=lib/cron.sh
   source "${SCRIPT_LIB_DIR}/cron.sh" || return 1
+  apply_user_menu_overrides
 }
 
 remove_all_singbox_service_units() {
