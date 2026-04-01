@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.33"
+SCRIPT_VERSION="4.1.34"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -660,6 +660,69 @@ source "${SCRIPT_LIB_DIR}/user.sh"
 
 # shellcheck source=lib/export.sh
 source "${SCRIPT_LIB_DIR}/export.sh"
+
+# 兼容兜底：即使加载到旧版 user.sh，也强制覆盖“节点权限”菜单为仅显式节点分配（无“全部节点”入口）
+user_manage_permission_menu() {
+  local db_json="$1" username="$2" json="$3"
+  local cleaned_db_json
+  cleaned_db_json="$(user_db_cleanup_missing_nodes "$db_json" "$json")" || cleaned_db_json="$db_json"
+  if [ "$(echo "$cleaned_db_json" | jq -c . 2>/dev/null)" != "$(echo "$db_json" | jq -c . 2>/dev/null)" ]; then
+    user_db_save "$cleaned_db_json"
+  fi
+  db_json="$cleaned_db_json"
+  local current_nodes_json
+  local nodes=() node i raw picks=() invalid=0 sel idx selected_json new_db
+
+  clear >&2
+  print_rect_title "节点权限" >&2
+  show_user_status_table "$db_json" >&2
+  current_nodes_json="$(echo "$db_json" | jq -c --arg u "$username" '(.users[$u].nodes // [])')"
+
+  ui_echo "当前权限类型：自定义节点"
+  ui_echo "当前已分配节点："
+  while IFS= read -r node; do
+    [ -n "$node" ] && ui_echo "- $node"
+  done < <(echo "$current_nodes_json" | jq -r '.[]?')
+  if ! echo "$current_nodes_json" | jq -e 'length > 0' >/dev/null 2>&1; then
+    ui_echo "- （无）"
+  fi
+  ui_echo "${B}--------------------------------------------------------${NC}"
+
+  mapfile -t nodes < <(list_all_node_keys "$json")
+  ui_echo "可选节点："
+  i=1
+  for node in "${nodes[@]}"; do
+    ui_echo "  ${i}. ${node}"
+    i=$((i+1))
+  done
+  read -r -p "请输入编号（多个用 + 连接，回车返回）: " raw
+  [ -z "${raw:-}" ] && return 1
+  mapfile -t picks < <(parse_plus_selections "$raw")
+  [ ${#picks[@]} -eq 0 ] && return 1
+
+  for sel in "${picks[@]}"; do
+    if ! [[ "$sel" =~ ^[0-9]+$ ]]; then invalid=1; break; fi
+    if [ "$sel" -lt 1 ] || [ "$sel" -gt "${#nodes[@]}" ]; then invalid=1; break; fi
+  done
+
+  if [ $invalid -eq 1 ]; then
+    ui_echo "${Y}[WARN]${NC} 输入编号无效，未做任何修改。"
+    pause >&2
+    return 1
+  fi
+
+  selected_json="$({
+    for sel in "${picks[@]}"; do
+      idx=$((sel-1))
+      if [ $idx -ge 0 ] && [ $idx -lt ${#nodes[@]} ]; then
+        echo "${nodes[$idx]}"
+      fi
+    done
+  } | awk 'NF' | LC_ALL=C sort -u | jq -R . | jq -s '.')"
+
+  new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].nodes = $nodes | .users[$u] |= del(.allow_all_nodes)')"
+  echo "$new_db"
+}
 
 # ====================================================
 # 700 Installer / system tools
