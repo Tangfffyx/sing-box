@@ -31,7 +31,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.11"
+SCRIPT_VERSION="4.1.12"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -3993,6 +3993,44 @@ prompt_protocol_port_and_entry_key() {
   return 0
 }
 
+build_standard_protocol_inbound() {
+  local proto="$1" port="$2" sni="${3:-}"
+  case "$proto" in
+    anytls) build_anytls_inbound "$port" "$sni" ;;
+    shadowsocks) build_ss_inbound "$port" ;;
+    trojan) build_trojan_inbound "$port" "$sni" ;;
+    tuic) build_tuic_inbound "$port" "$sni" ;;
+    *) return 1 ;;
+  esac
+}
+
+protocol_tls_label() {
+  case "$1" in
+    anytls) echo "AnyTLS" ;;
+    trojan) echo "Trojan" ;;
+    tuic) echo "TUIC" ;;
+    *) echo "" ;;
+  esac
+}
+
+install_standard_protocol_inbound() {
+  local json="$1" proto="$2" prompt="$3" default_port="$4" conflict_msg="$5" out_json_var="$6" out_entry_key_var="$7"
+  local port entry_key tls_label sni inbound updated
+
+  prompt_protocol_port_and_entry_key "$proto" "$prompt" "$default_port" "$json" port entry_key "$conflict_msg" || return 1
+  tls_label="$(protocol_tls_label "$proto")"
+  if [ -n "$tls_label" ]; then
+    sni="$(choose_tls_domain "$tls_label")" || return 1
+  fi
+
+  inbound="$(build_standard_protocol_inbound "$proto" "$port" "${sni:-}")" || return 1
+  updated="$(upsert_inbound_for_entry_key "$json" "$entry_key" "$inbound")" || return 1
+
+  printf -v "$out_json_var" '%s' "$updated"
+  printf -v "$out_entry_key_var" '%s' "$entry_key"
+  return 0
+}
+
 protocol_install_menu() {
   local json="$1"
   local updated_json="$json"
@@ -4058,26 +4096,18 @@ protocol_install_menu() {
         fi
         ;;
       2)
-        prompt_protocol_port_and_entry_key "anytls" "AnyTLS 端口 (默认: 443): " "443" "$updated_json" port entry_key \
+        install_standard_protocol_inbound "$updated_json" "anytls" "AnyTLS 端口 (默认: 443): " "443" "端口 %s 已被占用，请更换。" updated_json entry_key \
           || { warn "已返回上一级。"; pause; return 0; }
-        sni="$(choose_tls_domain "AnyTLS")" || return 0
-        inbound="$(build_anytls_inbound "$port" "$sni")"
-        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
       3)
-        prompt_protocol_port_and_entry_key "shadowsocks" "Shadowsocks 监听端口 (默认: 8080): " "8080" "$updated_json" port entry_key "端口 %s 已被同层协议占用，请更换。" \
+        install_standard_protocol_inbound "$updated_json" "shadowsocks" "Shadowsocks 监听端口 (默认: 8080): " "8080" "端口 %s 已被同层协议占用，请更换。" updated_json entry_key \
           || { warn "已返回上一级。"; pause; return 0; }
-        inbound="$(build_ss_inbound "$port")"
-        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
       4)
-        prompt_protocol_port_and_entry_key "trojan" "Trojan 端口 (默认: 443): " "443" "$updated_json" port entry_key \
+        install_standard_protocol_inbound "$updated_json" "trojan" "Trojan 端口 (默认: 443): " "443" "端口 %s 已被占用，请更换。" updated_json entry_key \
           || { warn "已返回上一级。"; pause; return 0; }
-        sni="$(choose_tls_domain "Trojan")" || return 0
-        inbound="$(build_trojan_inbound "$port" "$sni")"
-        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
       5)
@@ -4099,11 +4129,8 @@ protocol_install_menu() {
         added_node_keys+=("$entry_key")
         ;;
       7)
-        prompt_protocol_port_and_entry_key "tuic" "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" "$updated_json" port entry_key "端口 %s 已被其它 TUIC 占用，请更换。" \
+        install_standard_protocol_inbound "$updated_json" "tuic" "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" "端口 %s 已被其它 TUIC 占用，请更换。" updated_json entry_key \
           || { warn "已返回上一级。"; pause; return 0; }
-        sni="$(choose_tls_domain "TUIC")" || return 0
-        inbound="$(build_tuic_inbound "$port" "$sni")"
-        updated_json="$(upsert_inbound_for_entry_key "$updated_json" "$entry_key" "$inbound")"
         added_node_keys+=("$entry_key")
         ;;
     esac
