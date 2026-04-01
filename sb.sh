@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.1.20"
+SCRIPT_VERSION="4.1.21"
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -2883,15 +2883,17 @@ user_manager_menu() {
 # 600 Export
 # ====================================================
 
-if [ ! -s "${SCRIPT_LIB_DIR}/export.sh" ]; then
-  mkdir -p "$SCRIPT_LIB_DIR" >/dev/null 2>&1 || true
-  _self_export_module="$(dirname "$SCRIPT_SELF")/lib/export.sh"
-  if [ -s "$_self_export_module" ]; then
-    cp -f "$_self_export_module" "${SCRIPT_LIB_DIR}/export.sh" >/dev/null 2>&1 || true
-  else
-    curl -fsSL "${REMOTE_SCRIPT_BASE_URL}/lib/export.sh" -o "${SCRIPT_LIB_DIR}/export.sh" >/dev/null 2>&1 || true
+for _mod in export.sh cron.sh; do
+  if [ ! -s "${SCRIPT_LIB_DIR}/${_mod}" ]; then
+    mkdir -p "$SCRIPT_LIB_DIR" >/dev/null 2>&1 || true
+    _self_module="$(dirname "$SCRIPT_SELF")/lib/${_mod}"
+    if [ -s "$_self_module" ]; then
+      cp -f "$_self_module" "${SCRIPT_LIB_DIR}/${_mod}" >/dev/null 2>&1 || true
+    else
+      curl -fsSL "${REMOTE_SCRIPT_BASE_URL}/lib/${_mod}" -o "${SCRIPT_LIB_DIR}/${_mod}" >/dev/null 2>&1 || true
+    fi
   fi
-fi
+done
 
 # shellcheck source=lib/export.sh
 source "${SCRIPT_LIB_DIR}/export.sh"
@@ -2982,21 +2984,21 @@ download_remote_script_to_target() {
   return 0
 }
 
-copy_local_export_module_to_target() {
-  local source_script="$1"
+copy_local_module_to_target() {
+  local source_script="$1" module_file="$2"
   local source_base target_base
   source_base="$(cd "$(dirname "$source_script")" 2>/dev/null && pwd -P || dirname "$source_script")"
   target_base="$(dirname "$SB_TARGET_SCRIPT")"
-  [ -s "${source_base}/lib/export.sh" ] || return 1
+  [ -s "${source_base}/lib/${module_file}" ] || return 1
   mkdir -p "${target_base}/lib" >/dev/null 2>&1 || return 1
-  cp -f "${source_base}/lib/export.sh" "${target_base}/lib/export.sh"
+  cp -f "${source_base}/lib/${module_file}" "${target_base}/lib/${module_file}"
 }
 
-download_remote_export_module_to_target() {
-  local target_base
+download_remote_module_to_target() {
+  local module_file="$1" target_base
   target_base="$(dirname "$SB_TARGET_SCRIPT")"
   mkdir -p "${target_base}/lib" >/dev/null 2>&1 || return 1
-  curl -fsSL "${REMOTE_SCRIPT_BASE_URL}/lib/export.sh" -o "${target_base}/lib/export.sh"
+  curl -fsSL "${REMOTE_SCRIPT_BASE_URL}/lib/${module_file}" -o "${target_base}/lib/${module_file}"
 }
 
 sync_runtime_script_entrypoints() {
@@ -3009,12 +3011,14 @@ sync_runtime_script_entrypoints() {
   if [[ "$resolved" == /dev/fd/* ]] || [[ "$resolved" == /proc/self/fd/* ]] || [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]]; then
     if [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; then
       download_remote_script_to_target || true
-      download_remote_export_module_to_target || true
+      download_remote_module_to_target "export.sh" || true
+      download_remote_module_to_target "cron.sh" || true
     fi
   else
     if [ "$resolved" != "$SB_TARGET_SCRIPT" ] && { [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; }; then
       cp -f "$resolved" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-      copy_local_export_module_to_target "$resolved" >/dev/null 2>&1 || true
+      copy_local_module_to_target "$resolved" "export.sh" >/dev/null 2>&1 || true
+      copy_local_module_to_target "$resolved" "cron.sh" >/dev/null 2>&1 || true
     fi
   fi
 
@@ -3030,8 +3034,12 @@ install_script_self() {
       warn "快捷命令 s 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
       return 1
     }
-    download_remote_export_module_to_target || {
+    download_remote_module_to_target "export.sh" || {
       warn "快捷命令 s 安装失败：无法下载 export 模块。"
+      return 1
+    }
+    download_remote_module_to_target "cron.sh" || {
+      warn "快捷命令 s 安装失败：无法下载 cron 模块。"
       return 1
     }
   else
@@ -3041,7 +3049,8 @@ install_script_self() {
         warn "快捷命令 s 安装失败：无法复制脚本到 $SB_TARGET_SCRIPT"
         return 1
       }
-      copy_local_export_module_to_target "$current" >/dev/null 2>&1 || true
+      copy_local_module_to_target "$current" "export.sh" >/dev/null 2>&1 || true
+      copy_local_module_to_target "$current" "cron.sh" >/dev/null 2>&1 || true
     fi
   fi
   chmod +x "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
@@ -3098,110 +3107,9 @@ config_force_access_log_settings() {
   config_apply "$updated" || return 1
 }
 
-install_log_maintain_cron() {
-  install_managed_cron_job "$LOG_MAINTAIN_CRON_MARK" "$LOG_MAINTAIN_CRON_SCHEDULE" "--maintain-logs"
-}
 
-remove_log_maintain_cron() {
-  remove_managed_cron_job "$LOG_MAINTAIN_CRON_MARK"
-}
-
-install_user_watch_cron() {
-  install_managed_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "--user-watch"
-}
-
-remove_user_watch_cron() {
-  remove_managed_cron_job "$USER_WATCH_CRON_MARK"
-}
-
-build_managed_cron_command() {
-  local script_arg="$1"
-  printf 'bash %s %s >/dev/null 2>&1' "$SB_TARGET_SCRIPT" "$script_arg"
-}
-
-install_managed_cron_job() {
-  local mark="$1" schedule="$2" script_arg="$3"
-  has_cmd crontab || return 1
-  local tmp
-  tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -F -v "$mark" > "$tmp" || true
-  printf '%s %s\n' "$schedule" "$(build_managed_cron_command "$script_arg")" >> "$tmp"
-  crontab "$tmp"
-  rm -f "$tmp"
-}
-
-remove_managed_cron_job() {
-  local mark="$1"
-  has_cmd crontab || return 0
-  local tmp
-  tmp="$(mktemp)"
-  crontab -l 2>/dev/null | grep -F -v "$mark" > "$tmp" || true
-  if [ -s "$tmp" ]; then
-    crontab "$tmp"
-  else
-    crontab -r 2>/dev/null || true
-  fi
-  rm -f "$tmp"
-}
-
-managed_cron_job_exists() {
-  local mark="$1"
-  has_cmd crontab || return 1
-  crontab -l 2>/dev/null | grep -F "$mark" >/dev/null 2>&1
-}
-
-show_managed_cron_status() {
-  local user_watch_status log_maintain_status
-  if managed_cron_job_exists "$USER_WATCH_CRON_MARK"; then
-    user_watch_status="已安装"
-  else
-    user_watch_status="未安装"
-  fi
-  if managed_cron_job_exists "$LOG_MAINTAIN_CRON_MARK"; then
-    log_maintain_status="已安装"
-  else
-    log_maintain_status="未安装"
-  fi
-  echo -e "  用户巡检定时任务: ${user_watch_status}"
-  echo -e "  日志维护定时任务: ${log_maintain_status}"
-}
-
-cron_jobs_menu() {
-  while true; do
-    clear
-    print_rect_title "定时任务管理"
-    show_managed_cron_status
-    echo -e "${B}--------------------------------------------------------${NC}"
-    echo -e "  ${C}1.${NC} 安装用户巡检定时任务"
-    echo -e "  ${C}2.${NC} 移除用户巡检定时任务"
-    echo -e "  ${C}3.${NC} 安装日志维护定时任务"
-    echo -e "  ${C}4.${NC} 移除日志维护定时任务"
-    echo -e "  ${C}5.${NC} 一键安装全部定时任务"
-    echo -e "  ${C}6.${NC} 一键移除全部定时任务"
-    echo -e "  ${R}0.${NC} 返回上一级"
-    read -r -p "请选择操作: " act
-    case "${act:-}" in
-      1) install_user_watch_cron && ok "用户巡检定时任务已安装。" || err "用户巡检定时任务安装失败。" ;;
-      2) remove_user_watch_cron && ok "用户巡检定时任务已移除。" || err "用户巡检定时任务移除失败。" ;;
-      3) install_log_maintain_cron && ok "日志维护定时任务已安装。" || err "日志维护定时任务安装失败。" ;;
-      4) remove_log_maintain_cron && ok "日志维护定时任务已移除。" || err "日志维护定时任务移除失败。" ;;
-      5)
-        install_user_watch_cron && install_log_maintain_cron \
-          && ok "全部定时任务安装完成。" \
-          || err "一键安装失败，请检查 crontab 命令是否可用。"
-        ;;
-      6)
-        remove_user_watch_cron && remove_log_maintain_cron \
-          && ok "全部定时任务移除完成。" \
-          || err "一键移除失败，请检查 crontab 命令是否可用。"
-        ;;
-      0|q|Q|"") return 0 ;;
-      *) warn "无效输入：$act" ;;
-    esac
-    pause
-  done
-}
-
+# shellcheck source=lib/cron.sh
+source "${SCRIPT_LIB_DIR}/cron.sh"
 
 remove_all_singbox_service_units() {
   say "清理 sing-box service（包含官方残留）..."
