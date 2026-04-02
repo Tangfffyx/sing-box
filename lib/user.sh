@@ -427,7 +427,7 @@ list_all_node_keys() {
         echo "$np"
       fi
     done
-  } | awk 'NF' | LC_ALL=C sort -u
+  } | awk 'NF' | sort_node_keys_preferred
 }
 
 build_live_usage_object() {
@@ -844,7 +844,7 @@ select_nodes_multi() {
     printf -v "$outvar" '%s' '[]'
     return 0
   fi
-  ui_echo "请选择可用节点（多个用空格分隔，回车表示不选择）："
+  ui_echo "请选择可用节点（多个用 + 连接，0=清除全部，回车=跳过）："
   local i=1 node
   for node in "${nodes[@]}"; do
     ui_echo " [$i] $node"
@@ -852,14 +852,23 @@ select_nodes_multi() {
   done
   local ans picks_json='[]' part selected=()
   read -r -p "请输入编号: " ans
-  for part in $ans; do
-    if [[ "$part" =~ ^[0-9]+$ ]] && [ "$part" -ge 1 ] && [ "$part" -le "${#nodes[@]}" ]; then
-      selected+=("${nodes[$((part-1))]}")
+  [ -z "${ans:-}" ] && { printf -v "$outvar" '%s' '__SKIP__'; return 0; }
+  if [ "$ans" = "0" ]; then
+    printf -v "$outvar" '%s' '[]'
+    return 0
+  fi
+  local picks=()
+  mapfile -t picks < <(parse_plus_selections "$ans")
+  [ ${#picks[@]} -eq 0 ] && return 1
+  for part in "${picks[@]}"; do
+    if ! [[ "$part" =~ ^[0-9]+$ ]] || [ "$part" -lt 1 ] || [ "$part" -gt "${#nodes[@]}" ]; then
+      return 1
     fi
+    selected+=("${nodes[$((part-1))]}")
   done
   if [ ${#selected[@]} -gt 0 ]; then
     picks_json="$(printf '%s
-' "${selected[@]}" | awk 'NF' | sort -u | jq -R . | jq -s '.')"
+' "${selected[@]}" | awk 'NF' | sort_node_keys_preferred | jq -R . | jq -s '.')"
   fi
   printf -v "$outvar" '%s' "$picks_json"
 }
@@ -925,7 +934,16 @@ user_add_menu() {
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
-  nodes_json='[]'
+  ui_echo "${B}--------------------------------------------------------${NC}"
+  ui_echo "节点权限设置（回车跳过，默认不分配任何节点）"
+  ui_echo "0. 清除全部节点"
+  if ! select_nodes_multi "$json" nodes_json; then
+    pause
+    return 1
+  fi
+  if [ "$nodes_json" = "__SKIP__" ]; then
+    nodes_json='[]'
+  fi
   db_json="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson nodes "$nodes_json" '
     .users[$u] = {
       enabled: true,
@@ -973,8 +991,15 @@ user_manage_permission_menu() {
     ui_echo "  ${i}. ${node}"
     i=$((i+1))
   done
-  read -r -p "请输入编号（多个用 + 连接，回车返回）: " raw
+  ui_echo "  0. 清除全部节点"
+  read -r -p "请输入编号（多个用 + 连接，0=清除全部，回车跳过）: " raw
   [ -z "${raw:-}" ] && return 1
+  if [ "$raw" = "0" ]; then
+    selected_json='[]'
+    new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].nodes = $nodes | .users[$u] |= del(.allow_all_nodes)')"
+    echo "$new_db"
+    return 0
+  fi
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ ${#picks[@]} -eq 0 ] && return 1
 
@@ -996,7 +1021,7 @@ user_manage_permission_menu() {
         echo "${nodes[$idx]}"
       fi
     done
-  } | awk 'NF' | LC_ALL=C sort -u | jq -R . | jq -s '.')"
+  } | awk 'NF' | sort_node_keys_preferred | jq -R . | jq -s '.')"
 
   new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].nodes = $nodes | .users[$u] |= del(.allow_all_nodes)')"
   echo "$new_db"
