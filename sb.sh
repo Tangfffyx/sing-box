@@ -44,7 +44,8 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.2.1"
+SCRIPT_VERSION="4.2.2"
+RUNTIME_MODULE_FILES=(config.sh protocol.sh user.sh export.sh cron.sh)
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
 LOG_MAINTAIN_CRON_MARK="sing-box.sh --maintain-logs"
@@ -637,29 +638,43 @@ EOF_V2V
 # 600 Export
 # ====================================================
 
-for _mod in config.sh protocol.sh user.sh export.sh cron.sh; do
-  if [ ! -s "${SCRIPT_LIB_DIR}/${_mod}" ]; then
-    mkdir -p "$SCRIPT_LIB_DIR" >/dev/null 2>&1 || true
-    _self_module="$(dirname "$SCRIPT_SELF")/lib/${_mod}"
-    if [ -s "$_self_module" ]; then
-      cp -f "$_self_module" "${SCRIPT_LIB_DIR}/${_mod}" >/dev/null 2>&1 || true
-    else
-      curl -fsSL "${REMOTE_SCRIPT_BASE_URL}/lib/${_mod}" -o "${SCRIPT_LIB_DIR}/${_mod}" >/dev/null 2>&1 || true
-    fi
+ensure_runtime_module_file() {
+  local module_file="$1"
+  local target_file self_module
+
+  target_file="${SCRIPT_LIB_DIR}/${module_file}"
+  [ -s "$target_file" ] && return 0
+
+  mkdir -p "$SCRIPT_LIB_DIR" >/dev/null 2>&1 || return 1
+  self_module="$(dirname "$SCRIPT_SELF")/lib/${module_file}"
+  if [ -s "$self_module" ]; then
+    cp -f "$self_module" "$target_file" >/dev/null 2>&1 || return 1
+    return 0
   fi
+
+  curl -fsSL "${REMOTE_SCRIPT_BASE_URL}/lib/${module_file}" -o "$target_file" >/dev/null 2>&1 || return 1
+}
+
+source_runtime_module_or_exit() {
+  local module_file="$1"
+  local module_path="${SCRIPT_LIB_DIR}/${module_file}"
+
+  ensure_runtime_module_file "$module_file" || {
+    err "运行时模块缺失：${module_file}（目录：${SCRIPT_LIB_DIR}）"
+    err "请检查网络后执行：bash /root/sing-box.sh --update-script"
+    exit 1
+  }
+
+  # shellcheck source=/dev/null
+  source "$module_path" || {
+    err "加载模块失败：${module_path}"
+    exit 1
+  }
+}
+
+for _mod in "${RUNTIME_MODULE_FILES[@]}"; do
+  source_runtime_module_or_exit "$_mod"
 done
-
-# shellcheck source=lib/config.sh
-source "${SCRIPT_LIB_DIR}/config.sh"
-
-# shellcheck source=lib/protocol.sh
-source "${SCRIPT_LIB_DIR}/protocol.sh"
-
-# shellcheck source=lib/user.sh
-source "${SCRIPT_LIB_DIR}/user.sh"
-
-# shellcheck source=lib/export.sh
-source "${SCRIPT_LIB_DIR}/export.sh"
 
 # 兼容兜底：即使加载到旧版 user.sh，也强制覆盖“节点权限”菜单为仅显式节点分配（无“全部节点”入口）
 user_manage_permission_menu_override() {
@@ -872,7 +887,8 @@ download_remote_module_to_target() {
 
 sync_module_to_target() {
   local source_script="$1" module_file="$2"
-  copy_local_module_to_target "$source_script" "$module_file" >/dev/null 2>&1
+  copy_local_module_to_target "$source_script" "$module_file" >/dev/null 2>&1 && return 0
+  download_remote_module_to_target "$module_file" >/dev/null 2>&1
 }
 
 sync_runtime_script_entrypoints() {
@@ -885,20 +901,16 @@ sync_runtime_script_entrypoints() {
   if [[ "$resolved" == /dev/fd/* ]] || [[ "$resolved" == /proc/self/fd/* ]] || [[ "$0" == /dev/fd/* ]] || [[ "$0" == /proc/self/fd/* ]]; then
     if [ ! -s "$SB_TARGET_SCRIPT" ] || [ "$target_ver" != "$current_ver" ]; then
       download_remote_script_to_target || true
-      download_remote_module_to_target "config.sh" || true
-      download_remote_module_to_target "protocol.sh" || true
-      download_remote_module_to_target "user.sh" || true
-      download_remote_module_to_target "export.sh" || true
-      download_remote_module_to_target "cron.sh" || true
+      for _mod in "${RUNTIME_MODULE_FILES[@]}"; do
+        download_remote_module_to_target "$_mod" || true
+      done
     fi
   else
     if [ "$resolved" != "$SB_TARGET_SCRIPT" ]; then
       cp -f "$resolved" "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
-      sync_module_to_target "$resolved" "config.sh" || true
-      sync_module_to_target "$resolved" "protocol.sh" || true
-      sync_module_to_target "$resolved" "user.sh" || true
-      sync_module_to_target "$resolved" "export.sh" || true
-      sync_module_to_target "$resolved" "cron.sh" || true
+      for _mod in "${RUNTIME_MODULE_FILES[@]}"; do
+        sync_module_to_target "$resolved" "$_mod" || true
+      done
     fi
   fi
 
@@ -914,26 +926,12 @@ install_script_self() {
       warn "快捷命令 s 安装失败：无法下载脚本到 $SB_TARGET_SCRIPT"
       return 1
     }
-    download_remote_module_to_target "config.sh" || {
-      warn "快捷命令 s 安装失败：无法下载 config 模块。"
-      return 1
-    }
-    download_remote_module_to_target "protocol.sh" || {
-      warn "快捷命令 s 安装失败：无法下载 protocol 模块。"
-      return 1
-    }
-    download_remote_module_to_target "user.sh" || {
-      warn "快捷命令 s 安装失败：无法下载 user 模块。"
-      return 1
-    }
-    download_remote_module_to_target "export.sh" || {
-      warn "快捷命令 s 安装失败：无法下载 export 模块。"
-      return 1
-    }
-    download_remote_module_to_target "cron.sh" || {
-      warn "快捷命令 s 安装失败：无法下载 cron 模块。"
-      return 1
-    }
+    for _mod in "${RUNTIME_MODULE_FILES[@]}"; do
+      download_remote_module_to_target "$_mod" || {
+        warn "快捷命令 s 安装失败：无法下载 ${_mod} 模块。"
+        return 1
+      }
+    done
   else
     current="$(readlink -f "$current" 2>/dev/null || echo "$current")"
     if [ "$current" != "$SB_TARGET_SCRIPT" ]; then
@@ -942,11 +940,9 @@ install_script_self() {
         return 1
       }
     fi
-    sync_module_to_target "$current" "config.sh" || true
-    sync_module_to_target "$current" "protocol.sh" || true
-    sync_module_to_target "$current" "user.sh" || true
-    sync_module_to_target "$current" "export.sh" || true
-    sync_module_to_target "$current" "cron.sh" || true
+    for _mod in "${RUNTIME_MODULE_FILES[@]}"; do
+      sync_module_to_target "$current" "$_mod" || true
+    done
   fi
   chmod +x "$SB_TARGET_SCRIPT" >/dev/null 2>&1 || true
 }
@@ -1003,20 +999,15 @@ config_force_access_log_settings() {
 }
 
 
-# shellcheck source=lib/cron.sh
-source "${SCRIPT_LIB_DIR}/cron.sh"
+source_runtime_module_or_exit "cron.sh"
 
 reload_runtime_modules() {
-  # shellcheck source=lib/config.sh
-  source "${SCRIPT_LIB_DIR}/config.sh" || return 1
-  # shellcheck source=lib/protocol.sh
-  source "${SCRIPT_LIB_DIR}/protocol.sh" || return 1
-  # shellcheck source=lib/user.sh
-  source "${SCRIPT_LIB_DIR}/user.sh" || return 1
-  # shellcheck source=lib/export.sh
-  source "${SCRIPT_LIB_DIR}/export.sh" || return 1
-  # shellcheck source=lib/cron.sh
-  source "${SCRIPT_LIB_DIR}/cron.sh" || return 1
+  local _mod
+  for _mod in "${RUNTIME_MODULE_FILES[@]}"; do
+    ensure_runtime_module_file "$_mod" || return 1
+    # shellcheck source=/dev/null
+    source "${SCRIPT_LIB_DIR}/${_mod}" || return 1
+  done
   apply_user_menu_overrides
 }
 
