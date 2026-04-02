@@ -738,11 +738,20 @@ user_db_materialize_allow_all_nodes() {
 
 user_db_cleanup_missing_nodes() {
   local db_json="$1" json="$2"
-  db_json="$(user_db_materialize_allow_all_nodes "$db_json" "$json")" || return 1
-  local available_json
+  local available_json inbound_count available_count
   available_json="$(
     list_all_node_keys "$json" | jq -R . | jq -s '.'
   )"
+  inbound_count="$(echo "$json" | jq -r '[.inbounds[]?] | length' 2>/dev/null || echo 0)"
+  available_count="$(echo "$available_json" | jq -r 'length' 2>/dev/null || echo 0)"
+  if [[ "$inbound_count" =~ ^[0-9]+$ ]] && [[ "$available_count" =~ ^[0-9]+$ ]] \
+    && [ "$inbound_count" -gt 0 ] && [ "$available_count" -eq 0 ]; then
+    warn "检测到可用节点为空，跳过本次权限清理以避免误伤。"
+    echo "$db_json"
+    return 0
+  fi
+
+  db_json="$(user_db_materialize_allow_all_nodes "$db_json" "$json")" || return 1
   echo "$db_json" | jq --argjson available "$available_json" '
     .users |= with_entries(
       .value.nodes = (
