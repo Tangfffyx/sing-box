@@ -42,60 +42,6 @@ entry_key_to_port() {
   echo "$1" | awk -F- '{print $NF}'
 }
 
-protocol_sort_rank() {
-  case "$1" in
-    vless-reality) echo 10 ;;
-    anytls) echo 20 ;;
-    shadowsocks) echo 30 ;;
-    trojan) echo 40 ;;
-    vmess-ws) echo 60 ;;
-    vless-ws) echo 70 ;;
-    tuic) echo 80 ;;
-    *)
-      # 预留给未来协议：放在 trojan 与 vmess-ws 之间
-      echo 50
-      ;;
-  esac
-}
-
-node_key_base_entry() {
-  local node_key="$1"
-  if [[ "$node_key" == *"-to-"* ]]; then
-    echo "${node_key%%-to-*}"
-  else
-    echo "$node_key"
-  fi
-}
-
-node_key_to_protocol_label() {
-  local node_key="$1"
-  entry_key_to_protocol_label "$(node_key_base_entry "$node_key")"
-}
-
-sort_node_keys_preferred() {
-  local node proto rank base port
-  while IFS= read -r node; do
-    [ -n "$node" ] || continue
-    base="$(node_key_base_entry "$node")"
-    proto="$(entry_key_to_protocol_label "$base")"
-    rank="$(protocol_sort_rank "$proto")"
-    port="$(entry_key_to_port "$base")"
-    [[ "$port" =~ ^[0-9]+$ ]] || port=0
-    printf '%s\t%06d\t%s\t%06d\t%s\n' "$rank" "$port" "$proto" "$port" "$node"
-  done | sort -t $'\t' -k1,1n -k3,3 -k2,2n -k5,5 | awk -F $'\t' '!seen[$5]++ {print $5}'
-}
-
-sort_protocol_inventory_lines() {
-  local line entry_key proto port rank
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    IFS=$'\t' read -r entry_key proto port <<< "$line"
-    rank="$(protocol_sort_rank "$proto")"
-    [[ "$port" =~ ^[0-9]+$ ]] || port=0
-    printf '%s\t%06d\t%s\t%s\n' "$rank" "$port" "$proto" "$entry_key"
-  done | sort -t $'\t' -k1,1n -k3,3 -k2,2n -k4,4 | awk -F $'\t' '{printf "%s\t%s\t%s\n", $4, $3, ($2+0)}'
-}
-
 relay_user_name() {
   local entry_key="$1" land="$2"
   echo "${entry_key}-to-${land}"
@@ -336,7 +282,7 @@ protocol_status_summary() {
 
 protocol_entry_table() {
   local json="$1"
-  protocol_entry_inventory "$json" | sort_protocol_inventory_lines
+  protocol_entry_inventory "$json"
 }
 
 show_managed_relay_lines() {
@@ -658,3 +604,4 @@ remove_relays_for_entry_key() {
 
   remove_relays_by_user_names "$json" "$relay_users_json"
 }
+

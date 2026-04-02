@@ -44,7 +44,7 @@ GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
 V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
-SCRIPT_VERSION="4.2.2"
+SCRIPT_VERSION="4.2.3"
 RUNTIME_MODULE_FILES=(config.sh protocol.sh user.sh export.sh cron.sh)
 USER_WATCH_CRON_MARK="sing-box.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
@@ -472,7 +472,7 @@ relay_add() {
 relay_delete() {
   init_manager_env
   local json lines=() node_lines=() choice picks=() updated_json line entry relay_user out_tag part idx
-  local node_key users_json ordered_nodes=() sorted_node_lines=()
+  local node_key users_json
   json="$(config_load)"
   mapfile -t lines < <(relay_list_table "$json")
   if [ ${#lines[@]} -eq 0 ]; then
@@ -493,14 +493,6 @@ relay_delete() {
         }
       }'
   )
-  mapfile -t ordered_nodes < <(
-    printf '%s\n' "${node_lines[@]}" | awk -F '\t' 'NF >= 2 {print $2}' | awk 'NF' | sort_node_keys_preferred
-  )
-  for node_key in "${ordered_nodes[@]}"; do
-    line="$(printf '%s\n' "${node_lines[@]}" | awk -F '\t' -v n="$node_key" '$2 == n {print; exit}')"
-    [ -n "$line" ] && sorted_node_lines+=("$line")
-  done
-  node_lines=("${sorted_node_lines[@]}")
 
   clear
   echo -e "${R}--- 删除中转节点 ---${NC}"
@@ -713,15 +705,8 @@ user_manage_permission_menu_override() {
     ui_echo "  ${i}. ${node}"
     i=$((i+1))
   done
-  ui_echo "  0. 清除全部节点"
-  read -r -p "请输入编号（多个用 + 连接，0=清除全部，回车跳过）: " raw
+  read -r -p "请输入编号（多个用 + 连接，回车返回）: " raw
   [ -z "${raw:-}" ] && return 1
-  if [ "$raw" = "0" ]; then
-    selected_json='[]'
-    new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].nodes = $nodes | .users[$u] |= del(.allow_all_nodes)')"
-    echo "$new_db"
-    return 0
-  fi
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ ${#picks[@]} -eq 0 ] && return 1
 
@@ -743,7 +728,7 @@ user_manage_permission_menu_override() {
         echo "${nodes[$idx]}"
       fi
     done
-  } | awk 'NF' | sort_node_keys_preferred | jq -R . | jq -s '.')"
+  } | awk 'NF' | LC_ALL=C sort -u | jq -R . | jq -s '.')"
 
   new_db="$(echo "$db_json" | jq --arg u "$username" --argjson nodes "$selected_json" '.users[$u].nodes = $nodes | .users[$u] |= del(.allow_all_nodes)')"
   echo "$new_db"
@@ -1804,7 +1789,6 @@ ${R}已安装核心模块如下（多个用 + 连接，如 1+2）:${NC}"
         .value.nodes = ((.value.nodes // []) | map(select(($removed | index(.)) == null)))
       )
     ')"
-    db_json="$(user_db_cleanup_missing_nodes "$db_json" "$updated_json")"
     user_db_save "$db_json"
   fi
   pause

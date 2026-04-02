@@ -141,12 +141,10 @@ export_configs() {
 
   echo -e "${C}--- 节点配置导出 ---${NC}"
 
-  local direct_tmp relay_tmp user_dir direct_idx relay_idx
+  local direct_tmp relay_tmp user_dir
   direct_tmp="$(mktemp)"
   relay_tmp="$(mktemp)"
   user_dir="$(mktemp -d)"
-  direct_idx="$(mktemp)"
-  relay_idx="$(mktemp)"
 
   while read -r inbound; do
     local tag type port sni path sid method server_p proto
@@ -161,8 +159,7 @@ export_configs() {
     server_p="$(echo "$inbound" | jq -r '.password // empty')"
 
     while read -r user; do
-      local name uuid pass flow out_name pw_out business_user safe_user reality_public_key v2rayn_link
-      local block_file cat_idx proto_rank
+      local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
       name="$(echo "$user" | jq -r '.name // empty')"
       uuid="$(echo "$user" | jq -r '.uuid // empty')"
       pass="$(echo "$user" | jq -r '.password // empty')"
@@ -170,16 +167,15 @@ export_configs() {
       [ -z "$name" ] && continue
       out_name="$name"
 
-      block_file="$(mktemp "${user_dir}/blk.XXXXXX")"
       if [[ "$name" == *"@"* ]]; then
         business_user="$(user_business_name "$name")"
         safe_user="$(printf '%s' "$business_user" | tr '/ ' '__')"
-        cat_idx="${user_dir}/${safe_user}.idx"
+        target_file="${user_dir}/${safe_user}.tmp"
       elif printf '%s
 ' "$relay_users_nl" | grep -Fxq "$name"; then
-        cat_idx="$relay_idx"
+        target_file="$relay_tmp"
       else
-        cat_idx="$direct_idx"
+        target_file="$direct_tmp"
       fi
 
       case "$proto" in
@@ -196,7 +192,7 @@ ${W}[${out_name}]${NC}"
             echo ""
             v2rayn_link="$(build_v2rayn_vless_reality_link "$ip" "$port" "$uuid" "$sni" "$reality_public_key" "$sid" "$flow" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$block_file"
+          } >> "$target_file"
           ;;
         anytls)
           [ -z "$pass" ] && continue
@@ -209,7 +205,7 @@ ${W}[${out_name}]${NC}"
             echo ""
             v2rayn_link="$(build_v2rayn_anytls_link "$ip" "$port" "$pass" "$sni" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$block_file"
+          } >> "$target_file"
           ;;
         shadowsocks)
           [ -z "$pass" ] && continue
@@ -225,7 +221,7 @@ ${W}[${out_name}]${NC}"
             echo ""
             v2rayn_link="$(build_v2rayn_ss_link "$ip" "$port" "$method" "$pw_out" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$block_file"
+          } >> "$target_file"
           ;;
         trojan)
           [ -z "$pass" ] && continue
@@ -240,7 +236,7 @@ ${W}[${out_name}]${NC}"
             echo ""
             v2rayn_link="$(build_v2rayn_trojan_link "$ip" "$port" "$pass" "$sni" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$block_file"
+          } >> "$target_file"
           ;;
         vmess-ws)
           [ -z "$uuid" ] && continue
@@ -255,7 +251,7 @@ ${W}[${out_name}]${NC}"
             echo ""
             v2rayn_link="$(build_v2rayn_vmess_ws_link "$ip" "$uuid" "$vm_domain" "${path}?ed=2048" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$block_file"
+          } >> "$target_file"
           ;;
         vless-ws)
           [ -z "$uuid" ] && continue
@@ -268,7 +264,7 @@ ${W}[${out_name}]${NC}"
             echo ""
             v2rayn_link="$(build_v2rayn_vless_ws_link "$ip" "$uuid" "$ws_domain" "${path}?ed=2048" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$block_file"
+          } >> "$target_file"
           ;;
         tuic)
           [ -z "$uuid" ] && continue
@@ -282,25 +278,14 @@ ${W}[${out_name}]${NC}"
             echo ""
             v2rayn_link="$(build_v2rayn_tuic_link "$ip" "$port" "$uuid" "$pass" "$sni" "$out_name")"
             echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$block_file"
+          } >> "$target_file"
           ;;
       esac
-      if [ -s "$block_file" ]; then
-        proto_rank="$(protocol_sort_rank "$proto")"
-        printf '%s\t%s\t%s\t%s\n' "$proto_rank" "$proto" "$out_name" "$block_file" >> "$cat_idx"
-      else
-        rm -f "$block_file" >/dev/null 2>&1 || true
-      fi
     done < <(echo "$inbound" | jq -c '.users[]?')
   done < <(echo "$json" | jq -c '.inbounds[]?')
 
   echo -e "
 ${C}直连节点${NC}"
-  if [ -s "$direct_idx" ]; then
-    while IFS=$'\t' read -r _rank _proto _name file_path; do
-      [ -s "$file_path" ] && cat "$file_path" >> "$direct_tmp"
-    done < <(sort -t $'\t' -k1,1n -k2,2 -k3,3 "$direct_idx")
-  fi
   if [ -s "$direct_tmp" ]; then
     cat "$direct_tmp"
   else
@@ -309,27 +294,20 @@ ${C}直连节点${NC}"
 
   echo -e "
 ${C}中转节点${NC}"
-  if [ -s "$relay_idx" ]; then
-    while IFS=$'\t' read -r _rank _proto _name file_path; do
-      [ -s "$file_path" ] && cat "$file_path" >> "$relay_tmp"
-    done < <(sort -t $'\t' -k1,1n -k2,2 -k3,3 "$relay_idx")
-  fi
   if [ -s "$relay_tmp" ]; then
     cat "$relay_tmp"
   else
     echo -e "  ${Y}当前没有中转节点。${NC}"
   fi
 
-  local user_file printed=0 user_name file_path
+  local user_file printed=0 user_name
   while IFS= read -r -d '' user_file; do
     printed=1
-    user_name="$(basename "$user_file" .idx)"
+    user_name="$(basename "$user_file" .tmp)"
     echo -e "
 ${C}${user_name}节点${NC}"
-    while IFS=$'\t' read -r _rank _proto _name file_path; do
-      [ -s "$file_path" ] && cat "$file_path"
-    done < <(sort -t $'\t' -k1,1n -k2,2 -k3,3 "$user_file")
-  done < <(find "$user_dir" -maxdepth 1 -type f -name '*.idx' -print0 | sort -z)
+    cat "$user_file"
+  done < <(find "$user_dir" -maxdepth 1 -type f -name '*.tmp' -print0 | sort -z)
 
   if [ "$printed" -eq 0 ]; then
     echo -e "
@@ -338,7 +316,8 @@ ${C}用户节点${NC}"
   fi
 
   rm -rf "$user_dir" >/dev/null 2>&1 || true
-  rm -f "$direct_tmp" "$relay_tmp" "$direct_idx" "$relay_idx" >/dev/null 2>&1 || true
+  rm -f "$direct_tmp" "$relay_tmp" >/dev/null 2>&1 || true
   echo ""
   pause
 }
+
