@@ -925,7 +925,11 @@ user_add_menu() {
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "[WARN] 输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
-  nodes_json='[]'
+  if ! select_nodes_multi "$json" nodes_json; then
+    warn "节点权限输入无效，未作修改，已返回上一级。"
+    pause
+    return 1
+  fi
   db_json="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" --argjson reset "$reset_day" --arg expire "$expire_at" --argjson nodes "$nodes_json" '
     .users[$u] = {
       enabled: true,
