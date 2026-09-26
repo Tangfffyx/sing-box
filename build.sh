@@ -21,7 +21,6 @@ fi
   echo '# Sing-box Elite Management System'
   echo '# 由 build.sh 自动合并生成，请勿直接编辑此文件'
   echo '# 源码位于 lib/ 目录下的各模块文件'
-  echo "# 构建时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
   echo '# ============================================================'
   echo ''
 

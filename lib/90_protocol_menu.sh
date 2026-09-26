@@ -521,7 +521,7 @@ protocol_install_menu() {
     for node_key in "${added_node_keys[@]}"; do
       db_json="$(user_db_on_node_added "$db_json" "$node_key")"
     done
-    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$candidate_meta"; then
+    if _USER_KEEP_LATEST_DB=1 _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$candidate_meta"; then
       _install_ok=1
     else
       warn "协议安装/更新失败，已返回上一级。"
@@ -609,7 +609,7 @@ protocol_remove_menu() {
     local db_json
     sync_user_usage_counters || true
     db_json="$(user_db_load)"
-    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
+    if _USER_KEEP_LATEST_DB=1 _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
       _apply_ok=1
     else
       warn "协议卸载失败，已返回上一级。"

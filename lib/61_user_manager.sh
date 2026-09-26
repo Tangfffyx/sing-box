@@ -135,12 +135,65 @@ filter_disabled_auth_users() {
   ' --argjson enabled "$enabled_json"
 }
 
+# 菜单传入前后快照用于提取字段补丁；在锁内将补丁合并到最新数据。
+# 同字段被其他管理操作修改时拒绝提交，避免无声覆盖。
+merge_user_edit() {
+  local current="$1" before="$2" after="$3" mode="${4:-edit}" target="${5:-}"
+  printf '%s' "$current" | jq --argjson before "$before" --argjson after "$after" --arg mode "$mode" --arg target "$target" '
+    def policy: del(.used_up_bytes,.used_down_bytes,.last_live_up_bytes,.last_live_down_bytes,.manual_added_bytes);
+    reduce ((($before.users|keys) + ($after.users|keys)) | unique[]) as $u (. ;
+      ($before.users[$u]) as $old | ($after.users[$u]) as $new
+      | if $old == null then
+          if .users[$u] != null then error("用户已被其他操作创建: " + $u) else .users[$u]=$new end
+        elif $new == null then
+          if .users[$u] == null then .
+          elif ((.users[$u]|policy) != ($old|policy)) then error("用户状态已变化，请重新确认删除: " + $u)
+          else del(.users[$u]) end
+        else
+          ([$new|keys[] | select(. != "used_up_bytes" and . != "used_down_bytes" and . != "last_live_up_bytes" and . != "last_live_down_bytes")
+            | . as $f | select($new[$f] != $old[$f])]) as $fields
+          | if ($fields|length) == 0 and ($u != $target or $mode != "reset") then .
+            elif .users[$u] == null then error("用户已被删除: " + $u)
+            else reduce $fields[] as $f (. ;
+              if $f == "manual_added_bytes" and $mode == "add" then
+                .users[$u][$f] = ((.users[$u][$f] // 0) + ($new[$f] // 0) - ($old[$f] // 0))
+              elif $f == "manual_added_bytes" and $mode == "reset" then .
+              elif .users[$u][$f] != $old[$f] then error("字段已被其他操作修改: " + $u + "." + $f)
+              else .users[$u][$f]=$new[$f] end)
+            end
+        end)
+    | if $mode == "reset" then
+        if .users[$target] == null then error("用户不存在") else
+          .users[$target].used_up_bytes=0 | .users[$target].used_down_bytes=0 | .users[$target].manual_added_bytes=0
+        end
+      else . end
+  '
+}
+
+user_manager_commit_edit() {
+  with_manager_lock _user_manager_commit_edit_body "$@"
+}
+
+_user_manager_commit_edit_body() {
+  local before="$1" after="$2" mode="${3:-edit}" target="${4:-}" merged
+  sync_user_usage_counters || return 1
+  merged="$(merge_user_edit "$(user_db_load)" "$before" "$after" "$mode" "$target")" || {
+    err "数据已变化或输入无效，请重新打开菜单后操作。"
+    return 1
+  }
+  _user_manager_apply_changes_body "$merged"
+}
+
 user_manager_apply_changes() {
   with_manager_lock _user_manager_apply_changes_body "$@"
 }
 
 _user_manager_apply_changes_body() {
   local db_json="$1" base_json="${2:-}" meta_json="${3:-}"
+  if [ "${_USER_KEEP_LATEST_DB:-0}" = "1" ]; then
+    sync_user_usage_counters || return 1
+    db_json="$(user_db_load)"
+  fi
   [ -n "$base_json" ] || base_json="$(config_load)"
 
   db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
@@ -232,9 +285,13 @@ user_current_period() {
 }
 
 user_manager_reconcile_user_state() {
+  with_manager_lock _user_manager_reconcile_user_state_body
+}
+
+_user_manager_reconcile_user_state_body() {
   init_manager_env || return 1
   user_db_exists || return 0
-  sync_user_usage_counters || true
+  sync_user_usage_counters || return 1
 
   local db_json json today period today_day last_day result changed
   db_json="$(user_db_load)"
@@ -265,6 +322,14 @@ user_manager_reconcile_user_state() {
           else 0 end
         ) as $effective_reset_day
 
+      | ($period | split("-") | map(tonumber)) as $ym
+      | (if $ym[1] == 1 then [($ym[0]-1),12] else [$ym[0],($ym[1]-1)] end) as $prev
+      | (if $today_day >= $effective_reset_day then $period
+         else (($prev[0]|tostring) + "-" + ("0" + ($prev[1]|tostring))[-2:]) end) as $due_period
+      # 新建用户/调整重置日先建账，不追溯清零；已有账期则补做漏掉的重置。
+      | if ($effective_reset_day > 0 and $last_reset == "") then
+          .value.last_reset_period = $due_period
+        else . end
       # 1. 到期检查：expire_at 为到期停用日，当天即禁用
       | if $expired then
           .value.enabled = false
@@ -275,11 +340,11 @@ user_manager_reconcile_user_state() {
             end
         end
       # 2. 重置检查
-      | if (($expired | not) and $effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
+      | if (($expired | not) and $effective_reset_day > 0 and $last_reset != "" and $last_reset < $due_period) then
           .value.used_up_bytes = 0
           | .value.used_down_bytes = 0
           | .value.manual_added_bytes = 0
-          | .value.last_reset_period = $period
+          | .value.last_reset_period = $due_period
           | if ((.value.disabled_reason // null) == "quota_exceeded") then
               .value.enabled = true
               | .value.disabled_reason = null
@@ -314,11 +379,8 @@ user_watch_run() {
   user_db_exists || return 0
   mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
   if ! has_cmd flock || ! { exec {lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
-    if user_manager_background_sync >/dev/null 2>&1; then
-      apply_automatic_user_controls >/dev/null 2>&1 || true
-      user_db_touch_data_updated_at >/dev/null 2>&1 || true
-    fi
-    return 0
+    err "无法获取管理锁，本轮后台同步已跳过。"
+    return 1
   fi
   flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁

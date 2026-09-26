@@ -2,6 +2,11 @@ name: Build sing-box with v2ray api
 
 on:
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: Rebuild the same upstream version
+        type: boolean
+        default: false
   schedule:
     # 每天 03:20 UTC，配合 should_build 比对，无新版自动跳过
     - cron: "20 3 * * *"
@@ -32,7 +37,7 @@ jobs:
           current_tag=$(curl -fsSL https://api.github.com/repos/${{ github.repository }}/releases/latest 2>/dev/null | jq -r '.tag_name // empty' || true)
           echo "tag=$current_tag" >> "$GITHUB_OUTPUT"
 
-          if [ "${{ steps.latest.outputs.tag }}" = "$current_tag" ]; then
+          if [ "${{ inputs.force_build }}" != "true" ] && [ "${{ steps.latest.outputs.tag }}" = "$current_tag" ]; then
             echo "should_build=false" >> "$GITHUB_OUTPUT"
             echo "Already latest: $current_tag"
           else
@@ -58,7 +63,7 @@ jobs:
         if: steps.current.outputs.should_build == 'true'
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          go-version-file: sing-box-src/go.mod
           cache: true
           cache-dependency-path: sing-box-src/go.sum
 
@@ -162,15 +167,4 @@ jobs:
             --title "$tag" \
             --notes "Auto-built sing-box with with_v2ray_api and with_naive_outbound"
 
-      - name: Delete old releases
-        if: steps.current.outputs.should_build == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          new_tag="${{ steps.latest.outputs.tag }}"
-          gh release list --repo "${{ github.repository }}" --limit 100 --json tagName --jq '.[].tagName' | \
-            grep -v "^${new_tag}$" | \
-            while read -r old_tag; do
-              echo "Deleting release and tag: $old_tag"
-              gh release delete "$old_tag" --repo "${{ github.repository }}" -y --cleanup-tag || true
-            done
+      # 保留历史 release/tag，供指定版本安装与故障回退。

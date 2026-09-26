@@ -50,6 +50,10 @@ user_db_save() {
 }
 
 user_db_touch_data_updated_at() {
+  with_manager_lock _user_db_touch_data_updated_at_body "$@"
+}
+
+_user_db_touch_data_updated_at_body() {
   user_db_exists || return 0
   local db_json now_text
   db_json="$(user_db_load)"
@@ -151,6 +155,10 @@ user_db_cleanup_missing_nodes() {
 }
 
 user_db_cleanup_current_and_save() {
+  with_manager_lock _user_db_cleanup_current_and_save_body "$@"
+}
+
+_user_db_cleanup_current_and_save_body() {
   local db_json json cleaned
   user_db_exists || return 0
   db_json="$(user_db_load)"

@@ -171,57 +171,58 @@ openrc_stop_service() {
   rc-service "$service" stop
 }
 
-reload_or_restart_singbox_safe() {
-  if ! check_config_or_print; then
-    err "已阻止热载：请先修复配置。"
-    return 1
-  fi
-  local quiet="${_RESTART_SINGBOX_QUIET_OK:-0}" action=""
+# HUP 会在原进程中重建实例；这里明确重启并验证新的进程，兼顾升级与计费代次。
+singbox_process_token() {
+  local pid stat boot
   case "$INIT_SYSTEM" in
-    systemd)
-      if [ "$quiet" = "1" ]; then
-        if systemctl reload sing-box >/dev/null 2>&1; then
-          action="热载"
-        elif systemctl restart sing-box >/dev/null 2>&1; then
-          action="重启"
-        else
-          return 1
-        fi
-      else
-        if systemctl reload sing-box 2>/dev/null; then
-          action="热载"
-        elif systemctl restart sing-box; then
-          action="重启"
-        else
-          return 1
-        fi
-      fi
-      ;;
-    openrc)
-      if [ "$quiet" = "1" ]; then
-        if rc-service sing-box reload >/dev/null 2>&1; then
-          action="热载"
-        elif rc-service sing-box restart >/dev/null 2>&1; then
-          action="重启"
-        else
-          return 1
-        fi
-      else
-        if rc-service sing-box reload 2>/dev/null; then
-          action="热载"
-        elif rc-service sing-box restart; then
-          action="重启"
-        else
-          return 1
-        fi
-      fi
-      ;;
-    *)
-      err "未识别的 init 系统，无法热载 sing-box。"
-      return 1
-      ;;
+    systemd) pid="$(systemctl show sing-box -p MainPID --value 2>/dev/null)" || return 1 ;;
+    openrc) pid="$(cat /run/sing-box.pid 2>/dev/null)" || return 1 ;;
+    *) return 1 ;;
   esac
-  [ "$quiet" = "1" ] || ok "sing-box 已${action}。"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+  # comm 字段可以包含空格及括号；删到最后一个右括号后再取 starttime。
+  stat="${stat##*) }"
+  stat="$(printf '%s\n' "$stat" | awk '{print $20}')"
+  [[ "$stat" =~ ^[0-9]+$ ]] || return 1
+  boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+  printf '%s:%s:%s\n' "$boot" "$pid" "$stat"
+}
+
+wait_singbox_ready() {
+  local old_token="${1:-}" token="" last_token="" stable=0 attempt api_enabled
+  api_enabled="$(jq -r '.experimental.v2ray_api.stats.enabled // false' "$CONFIG_FILE")" || return 1
+  for ((attempt=0; attempt<20; attempt++)); do
+    token="$(singbox_process_token 2>/dev/null)" || token=""
+    if singbox_service_active && [ -n "$token" ] && [ "$token" != "$old_token" ]; then
+      if [ "$api_enabled" != true ] || query_v2ray_api_uptime >/dev/null 2>&1; then
+        if [ "$token" = "$last_token" ]; then stable=$((stable + 1)); else stable=1; fi
+        last_token="$token"
+        [ "$stable" -ge 3 ] && return 0
+      else
+        stable=0
+      fi
+    else
+      stable=0
+    fi
+    sleep 1
+  done
+  err "sing-box 未在期限内稳定启动或统计 API 不可用。"
+  return 1
+}
+
+reload_or_restart_singbox_safe() {
+  check_config_or_print || return 1
+  local old_token quiet="${_RESTART_SINGBOX_QUIET_OK:-0}"
+  old_token="$(singbox_process_token 2>/dev/null)" || old_token=""
+  case "$INIT_SYSTEM" in
+    systemd) systemctl restart sing-box >/dev/null 2>&1 || return 1 ;;
+    openrc) rc-service sing-box restart >/dev/null 2>&1 || return 1 ;;
+    *) err "未识别的 init 系统，无法重启 sing-box。"; return 1 ;;
+  esac
+  wait_singbox_ready "$old_token" || return 1
+  [ "$quiet" = "1" ] || ok "sing-box 已重启并通过运行检查。"
+  return 0
 }
 
 enable_now_singbox_safe() {
@@ -260,7 +261,8 @@ with_manager_lock() {
   fi
 
   if ! has_cmd flock; then
-    if "$@"; then return 0; else return $?; fi
+    err "缺少 flock，已阻止无锁写入；请先安装 util-linux（Alpine: flock）。"
+    return 1
   fi
 
   mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
@@ -277,11 +279,12 @@ with_manager_lock() {
       { exec {_lock_fd}>&-; } 2>/dev/null || true
     else
       { exec {_lock_fd}>&-; } 2>/dev/null || true
-      if "$@"; then _rc=0; else _rc=$?; fi
+      err "获取管理锁失败，未执行写入。"
+      _rc=1
     fi
   else
-    # 锁文件不可创建时降级为无锁模式（不阻塞功能）
-    if "$@"; then _rc=0; else _rc=$?; fi
+    err "无法创建管理锁：$SB_LOCK_FILE，未执行写入。"
+    _rc=1
   fi
   return $_rc
 }
@@ -336,12 +339,17 @@ _config_apply_body() {
     return 1
   fi
 
+  if [ "${_CONFIG_FORCE_RESTART:-0}" != "1" ] && [ -s "$CONFIG_FILE" ] && singbox_service_active; then
+    if [ "$(printf '%s' "$normalized" | jq -Sc .)" = "$(jq -Sc . "$CONFIG_FILE")" ]; then
+      return 0
+    fi
+  fi
   if [ "${_CONFIG_SKIP_USAGE_SYNC:-0}" != "1" ]; then
-    sync_user_usage_counters || true
+    sync_user_usage_counters || return 1
   fi
 
   local tmp_file
-  tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)" || {
+  tmp_file="$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")" || {
     err "创建临时配置文件失败。"
     return 1
   }
@@ -368,7 +376,7 @@ _config_apply_body() {
   local ts backup prev_tmp
   ts="$(date +%Y%m%d_%H%M%S)"
   backup="/etc/sing-box/config.json.bak.fail.$ts"
-  prev_tmp="$(mktemp /etc/sing-box/config.json.prev.XXXXXX)" || {
+  prev_tmp="$(mktemp "${CONFIG_FILE}.prev.XXXXXX")" || {
     err "创建回滚临时文件失败。"
     rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1

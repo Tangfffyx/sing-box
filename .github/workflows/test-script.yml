@@ -1,0 +1,40 @@
+name: Script regression tests
+on:
+  pull_request:
+  push:
+    branches: [main, 'fix/**']
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Ubuntu fixtures and generated script
+        run: bash tests/check.sh
+      - name: Alpine fixtures and generated script
+        run: |
+          docker run --rm -v "$PWD:/work:ro" -w /work alpine:3.22 \
+            sh -c 'apk add --no-cache bash jq python3 util-linux >/dev/null && bash tests/check.sh'
+  core-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: SagerNet/sing-box
+          ref: v1.14.2
+          path: upstream
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: upstream/go.mod
+          cache-dependency-path: upstream/go.sum
+      - name: Build core and statistics client
+        run: |
+          cd upstream
+          go build -tags with_v2ray_api -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
+          go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3
+      - name: Real core loopback smoke test
+        run: bash tests/core-smoke.sh "$RUNNER_TEMP/sing-box" "$(go env GOPATH)/bin/grpcurl"

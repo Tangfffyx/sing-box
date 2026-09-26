@@ -247,14 +247,8 @@ route_rebuild(){
       + (if (($core_auth | length) > 0 and ($warp_tags | length) > 0) then [{auth_user:($core_auth | unique | sort),rule_set:$warp_tags,outbound:"warp"}] else [] end)
       + (if ($core_auth | length) > 0 then [{auth_user:($core_auth | unique | sort),outbound:"direct"}] else [] end)
     )
-    | .route.rules |= (
-        (reduce .[] as $r ({seen:{}, out:[]};
-          ($r | ((.outbound // "") + "|" + auth_key + "|" + rule_set_key)) as $key
-          | if .seen[$key] then .
-            else .seen[$key] = true | .out += [$r]
-            end
-        ) | .out)
-      )
+    # 保留规则的完整条件和顺序；生成的用户列表已在上面 unique。
+    # 不可用 outbound/auth_user/rule_set 三字段对用户规则做全局去重。
     | . as $root
     | .outbounds |= map(
         (.tag // "") as $tag
