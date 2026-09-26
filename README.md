@@ -20,7 +20,14 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 
 ---
 
-## 6.1.8 可靠性修复
+## 6.1.9：sing-box 1.14 适配与可靠性修复
+
+需要 sing-box **1.14.0 或更新版本**，当前验证版本为 **1.14.2**。旧内核应先从安装/更新菜单升级，再使用管理功能。
+
+- 远程规则集迁移到 `http_client`，保留自定义下载出站；默认拒绝改为末尾的 `action: reject`，不放开停用用户。
+- 用户投影与路由重建减少重复子进程，已有凭证和顺序保持不变；4 节点 / 40 用户的 VPS 对照测试从 10.5 秒降至 1.0 秒。
+- 修复 Shadowsocks UDP 端口冲突漏检、SS2022 相同双密钥导出遗漏，以及 WS 导出 early-data 字段层级。
+
 
 - 更新内核前用候选二进制检查现有配置，原子替换后明确重启，并检查新进程和已启用的统计 API。失败恢复旧内核与配置；成功保留 `sing-box.bak` 和 `config.json.bak.upgrade`。
 - 流量基线按进程代次和节点用户保存，菜单只合并本次修改的字段；同字段发生并发冲突时提示重新操作。
@@ -28,11 +35,11 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 - 配置未变化时不重启；需要应用运行配置时执行经过检查的重启，会短暂中断连接。
 - 管理写入必须取得文件锁，安装流程会补齐 flock。当前发布架构为 Linux amd64/arm64；旧 Release 不再自动删除。
 
-本轮保留 1.13/1.14 现有配置格式，HTTP client 字段迁移、默认拒绝规则迁移和 TG HTTPS/独立节点凭证另行处理。流量仍是周期采样，进程异常退出前未采样的尾部流量无法恢复；外部短时间连续 HUP 也不能保证精确识别，建议使用脚本的服务操作。
+TG HTTPS/独立节点凭证仍需单独改造；现有公网明文 HTTP 和共享密钥不适合直接暴露于不受信任网络。流量仍是周期采样，进程异常退出前未采样的尾部流量无法恢复；外部短时间连续 HUP 也不能保证精确识别，建议使用脚本的服务操作。
 
 VPS 验收步骤见 [测试清单](docs/TESTING.md)。
 
-开发验证：`bash tests/check.sh`。CI 在 Ubuntu、Alpine 运行回归测试，并对自行编译的 1.14.2 内核执行回环网络计费和用户拒绝测试。服务管理回归使用模拟 systemd/OpenRC 命令，不替代真实 VPS 的升级验收。
+开发验证：`bash tests/check.sh`。CI 在 Ubuntu、Alpine 运行回归，并编译 1.14.2 验证八种协议 TCP/UDP、停用与未授权用户、计费、中转、规则下载，以及独立 systemd 服务的升级回滚。实测范围与限制见 [验证结果](docs/VALIDATION-6.1.9.md)。
 
 ## 卸载说明
 

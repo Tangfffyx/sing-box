@@ -16,7 +16,7 @@ jobs:
       - name: Alpine fixtures and generated script
         run: |
           docker run --rm -v "$PWD:/work:ro" -w /work alpine:3.22 \
-            sh -c 'apk add --no-cache bash jq python3 util-linux >/dev/null && bash tests/check.sh'
+            sh -c 'apk add --no-cache bash jq python3 util-linux openssl >/dev/null && bash tests/check.sh'
   core-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -34,7 +34,22 @@ jobs:
       - name: Build core and statistics client
         run: |
           cd upstream
-          go build -tags with_v2ray_api -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
+          go build -tags with_v2ray_api,with_quic,with_utls -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
           go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3
       - name: Real core loopback smoke test
         run: bash tests/core-smoke.sh "$RUNNER_TEMP/sing-box" "$(go env GOPATH)/bin/grpcurl"
+      - name: All eight protocols TCP/UDP and user permissions
+        run: |
+          export PATH="$RUNNER_TEMP:$PATH"
+          SB_TEST_CORE="$RUNNER_TEMP/sing-box" python3 tests/protocol-smoke.py
+      - name: Relay and remote rule-set smoke tests
+        run: |
+          sudo install "$RUNNER_TEMP/sing-box" /usr/local/bin/sing-box
+          sudo install "$(go env GOPATH)/bin/grpcurl" /usr/local/bin/grpcurl
+          sudo bash tests/routing-smoke.sh
+      - name: Real systemd upgrade and rollback
+        run: sudo bash tests/systemd-smoke.sh --allow-systemd
+      - name: Real OpenRC upgrade rollback in Alpine
+        run: |
+          docker run --rm -v "$PWD:/work:ro" -v /usr/local/bin/sing-box:/fixture-core:ro -w /work alpine:3.22 \
+            sh -c 'apk add --no-cache bash jq python3 util-linux openssl openrc gcompat >/dev/null && bash tests/openrc-smoke.sh --disposable-container'

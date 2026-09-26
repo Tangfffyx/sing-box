@@ -535,6 +535,7 @@ install_or_update_singbox() {
     echo -e "最新版本：${G}${latest_ver}${NC}"
     if [ -n "${inst:-}" ] && version_ge "$inst" "$latest_ver"; then
       if is_install_complete; then
+        config_apply "$(config_load)" || { pause; return 1; }
         ok "当前已是最新版本。"
         pause
         return 0
@@ -664,9 +665,9 @@ install_candidate_singbox() {
   fi
   next_config="$(mktemp "${CONFIG_FILE}.upgrade.XXXXXX")" || return 1
   if [ "$had_config" = 1 ]; then
-    cat "$CONFIG_FILE" > "$next_config" || return 1
+    config_normalize "$(cat "$CONFIG_FILE")" > "$next_config" || { rm -f "$next_config"; return 1; }
   else
-    config_min_template > "$next_config" || return 1
+    config_normalize "$(config_min_template)" > "$next_config" || { rm -f "$next_config"; return 1; }
   fi
   if ! "$candidate" check -c "$next_config"; then
     rm -f "$next_config"

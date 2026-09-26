@@ -6,25 +6,6 @@
 #       50_v2ray_api.sh, 60_user_db.sh
 # ============================================================
 
-migrate_socks_user_object_for_desired() {
-  local inbound="$1" desired="$2" entry_key="$3"
-  [ "$(user_node_part "$desired")" = "$entry_key" ] || return 1
-  local business_user
-  business_user="$(user_business_name "$desired")"
-  echo "$inbound" | jq -c --arg desired "$desired" --arg biz "$business_user" '
-    def node_part($u): if ($u | contains("@")) then ($u | split("@")[0]) else $u end;
-    def business($u): if ($u | contains("@")) then ($u | split("@")[1]) else "admin" end;
-    [
-      (.users // [])[]?
-      | (.username // "") as $u
-      | select($u != "")
-      | select(((node_part($u) | contains("-to-")) | not))
-      | select(business($u) == $biz)
-      | .username = $desired
-    ][0] // empty
-  '
-}
-
 user_manager_apply_to_json() {
   local json="$1" db_json="$2" meta_json="${3:-}"
   local work_json="$json"
@@ -36,70 +17,39 @@ user_manager_apply_to_json() {
     inbound="$(find_inbound_by_entry_key "$work_json" "$entry_key")"
     [ -n "$inbound" ] || continue
 
-    local relay_nodes=() relay_node
-    mapfile -t relay_nodes < <(echo "$inbound" | jq -r '.users[]? | (.name // .username // empty)' | while IFS= read -r n; do
-      [ -n "$n" ] || continue
-      np="$(user_node_part "$n")"
-      if [[ "$np" == *"-to-"* && "$np" != "$entry_key" ]]; then
-        echo "$np"
-      fi
-    done | sort -u)
-
-    local credential_base_name="$entry_key"
-
-    local desired_names=()
-    if [ "$proto" != "socks" ] || user_db_user_is_enabled "$db_json" "admin"; then
-      desired_names+=("$credential_base_name")
-    fi
-    local username
-    while IFS= read -r username; do
-      [ -n "$username" ] || continue
-      [ "$username" = "admin" ] && continue
-      if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
-        continue
-      fi
-      if user_db_user_allow_node "$db_json" "$username" "$entry_key"; then
-        desired_names+=("$(node_user_name "$credential_base_name" "$username")")
-      fi
-    done < <(user_db_all_users "$db_json")
-
-    for relay_node in "${relay_nodes[@]}"; do
-      desired_names+=("$relay_node")
-      while IFS= read -r username; do
-        [ -n "$username" ] || continue
-        [ "$username" = "admin" ] && continue
-        if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
-          continue
-        fi
-        if user_db_user_allow_node "$db_json" "$username" "$relay_node"; then
-          desired_names+=("$(node_user_name "$relay_node" "$username")")
-        fi
-      done < <(user_db_all_users "$db_json")
-    done
-
-    local users_tmp
-    users_tmp="$(mktemp)"
-    local desired full_name existing_obj new_obj
-    for desired in "${desired_names[@]}"; do
-      existing_obj="$(find_user_obj_in_inbound "$inbound" "$desired")"
-      if [ -z "$existing_obj" ] && [ "$proto" = "socks" ]; then
-        existing_obj="$(migrate_socks_user_object_for_desired "$inbound" "$desired" "$entry_key" || true)"
-      fi
-      if [ -n "$existing_obj" ]; then
-        echo "$existing_obj" >> "$users_tmp"
-      else
-        new_obj="$(build_user_object_from_inbound "$inbound" "$desired")" || {
-          rm -f "$users_tmp"
-          return 1
-        }
-        echo "$new_obj" >> "$users_tmp"
-      fi
-    done
-    local users_json='[]'
-    if [ -s "$users_tmp" ]; then
-      users_json="$(jq -s '.' "$users_tmp")"
-    fi
-    rm -f "$users_tmp" >/dev/null 2>&1 || true
+    # Plan credentials in one jq pass; only new credentials need external generators.
+    local plan users_json missing desired new_obj
+    plan="$(echo "$inbound" | jq -c --argjson db "$db_json" --arg entry "$entry_key" --arg proto "$proto" "${JQ_NODE_PART}"'
+      def business($n): if ($n|contains("@")) then ($n|split("@")[1]) else "admin" end;
+      . as $ib
+      | [(.users // [])[] | (.name // .username // "") | node_part(.)
+         | select(contains("-to-") and . != $entry)] | unique as $relays
+      | def allowed($node):
+          $db.users | to_entries[] | select(.key != "admin")
+          | select($proto != "socks" or .value.enabled == true)
+          | select(.value.allow_all_nodes == true or ((.value.nodes // []) | index($node)) != null)
+          | $node + "@" + .key;
+      [if $proto != "socks" or $db.users.admin.enabled == true then $entry else empty end,
+       allowed($entry), ($relays[] | . as $node | $node, allowed($node))] as $desired
+      | (reduce ($ib.users // [])[] as $u ({}; .[$u.name // $u.username] //= $u)) as $existing
+      | [$desired[] | . as $name
+          | ($existing[$name] // (if $proto == "socks" and node_part($name) == $entry then
+              [$ib.users[]? | select((.username // "") != "")
+               | select((node_part(.username)|contains("-to-")|not) and business(.username) == business($name))
+               | .username=$name][0] else null end)) as $object
+          | {name:$name,object:$object}]
+    ')" || return 1
+    users_json="$(echo "$plan" | jq -c '[.[].object | select(. != null)]')" || return 1
+    while IFS= read -r desired; do
+      [ -n "$desired" ] || continue
+      new_obj="$(build_user_object_from_inbound "$inbound" "$desired")" || return 1
+      users_json="$(echo "$users_json" | jq -c --argjson obj "$new_obj" '. + [$obj]')" || return 1
+    done < <(echo "$plan" | jq -r '.[] | select(.object == null) | .name')
+    # Match the original desired order, including credentials just created.
+    users_json="$(echo "$users_json" | jq -c --argjson plan "$plan" '
+      (reduce .[] as $u ({}; .[$u.name // $u.username]=$u)) as $by_name
+      | [$plan[].name | $by_name[.]]
+    ')" || return 1
     work_json="$(echo "$work_json" | jq --argjson idx "$idx" --argjson users "$users_json" '.inbounds[$idx].users = $users')" || return 1
   done
 

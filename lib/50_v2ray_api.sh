@@ -9,26 +9,6 @@
 
 ensure_v2ray_api_proto_files() {
   mkdir -p /etc/sing-box
-  cat > "$V2RAY_PROTO_EXP" <<'EOF_V2E'
-syntax = "proto3";
-package experimental.v2rayapi;
-message GetStatsRequest { string name = 1; bool reset = 2; }
-message Stat { string name = 1; int64 value = 2; }
-message GetStatsResponse { Stat stat = 1; }
-message QueryStatsRequest { string pattern = 1; bool reset = 2; repeated string patterns = 3; bool regexp = 4; }
-message QueryStatsResponse { repeated Stat stat = 1; }
-message SysStatsRequest {}
-message SysStatsResponse {
-  uint32 NumGoroutine = 1; uint32 NumGC = 2; uint64 Alloc = 3; uint64 TotalAlloc = 4;
-  uint64 Sys = 5; uint64 Mallocs = 6; uint64 Frees = 7; uint64 LiveObjects = 8; uint64 PauseTotalNs = 9; uint32 Uptime = 10;
-}
-service StatsService {
-  rpc GetStats (GetStatsRequest) returns (GetStatsResponse);
-  rpc QueryStats (QueryStatsRequest) returns (QueryStatsResponse);
-  rpc GetSysStats (SysStatsRequest) returns (SysStatsResponse);
-}
-EOF_V2E
-
   cat > "$V2RAY_PROTO_V2RAY" <<'EOF_V2V'
 syntax = "proto3";
 package v2ray.core.app.stats.command;

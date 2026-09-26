@@ -16,7 +16,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.1.8"
+SCRIPT_VERSION="6.1.9"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -29,7 +29,6 @@ SINGBOX_BIN="${SINGBOX_INSTALL_DIR}/sing-box"
 SINGBOX_VERSION_STAMP="/etc/sing-box/.installed_release"
 GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
-V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
 USER_WATCH_CRON_MARK="sb.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
@@ -180,21 +179,16 @@ declare -A PROTO_PREFIX=(
   [socks]=socks
 )
 
-declare -A PREFIX_TO_PROTO=(
-  [reality]=vless-reality
-  [anytls]=anytls
-  [ss]=shadowsocks
-  [trojan]=trojan
-  [vmess-ws]=vmess-ws
-  [vless-ws]=vless-ws
-  [tuic]=tuic
-  [socks]=socks
-)
+declare -A PREFIX_TO_PROTO=()
+for proto in "${SUPPORTED_PROTOCOLS[@]}"; do
+  PREFIX_TO_PROTO["${PROTO_PREFIX[$proto]}"]="$proto"
+done
+unset proto
 
 declare -A PROTO_TRANSPORT=(
   [vless-reality]=tcp
   [anytls]=tcp
-  [shadowsocks]=tcp
+  [shadowsocks]="tcp udp"
   [trojan]=tcp
   [vmess-ws]=tcp
   [vless-ws]=tcp
@@ -802,8 +796,7 @@ JSON
 config_normalize() {
   local json="$1"
   if [ -z "$json" ]; then
-    config_min_template
-    return 0
+    json="$(config_min_template)"
   fi
   echo "$json" | jq '
     if type != "object" then
@@ -830,7 +823,7 @@ config_normalize() {
           | map(
               if ((.type // "") == "remote" and (((.tag // "") | startswith("warp-geosite-")) or ((.tag // "") | startswith("relay-geosite-")))) then
                 .format = (.format // "binary")
-                | .download_detour = "direct"
+
               else .
               end
             )
@@ -853,6 +846,40 @@ config_normalize() {
     | .experimental.cache_file.enabled = true
     | if (.outbounds | any((.tag // "")=="direct")) then . else .outbounds += [{"type":"direct","tag":"direct"}] end
     | if (.outbounds | any((.tag // "")=="reject")) then . else .outbounds += [{"type":"block","tag":"reject"}] end
+  ' | config_migrate_114
+
+}
+
+# Canonical 1.14 format. Preserve custom download detours and direct dialer options.
+config_migrate_114() {
+  jq '
+    . as $root
+    | def client($tag):
+        ([$root.outbounds[]? | select(.tag == $tag)][0]) as $out
+        | if $out.type == "direct" and ($out | del(.type,.tag) | length) == 0
+          then {version:2} else {version:2,detour:$tag} end;
+    .route.rule_set |= (if . == null then . else map(
+      if .type == "remote" then
+        if (.http_client? == null) then
+          .http_client = (if (.download_detour // "") != "" then client(.download_detour)
+            elif ($root.http_clients // [] | length) > 0 or ($root.route.default_http_client // "") != "" then null
+            else client(if ($root.route.final // "reject") == "reject" then "direct" else $root.route.final end) end)
+        else . end
+        | del(.download_detour)
+        | if .http_client == null then del(.http_client)
+          elif (.http_client|type) == "object" and (.http_client.detour // "") != "" then
+            .http_client as $c | client($c.detour) as $base
+            | if $base.detour? == null then .http_client |= del(.detour) else . end
+          else . end
+      else . end) end)
+    | if .route.rule_set == null then del(.route.rule_set) else . end
+    | [.outbounds[]? | select(.type == "block") | .tag] as $blocks
+    | .route.rules |= map(walk(if type == "object" and .outbound? != null
+        then .outbound as $o | if ($blocks|index($o)) != null then del(.outbound) | .action="reject" else . end
+        else . end))
+    | .outbounds |= map(select(.type != "block"))
+    | del(.route.final)
+    | .route.rules = ([.route.rules[]? | select(. != {action:"reject"})] + [{action:"reject"}])
   '
 }
 
@@ -860,7 +887,7 @@ config_load() {
   if [ -s "$CONFIG_FILE" ] && jq -e . "$CONFIG_FILE" >/dev/null 2>&1; then
     config_normalize "$(cat "$CONFIG_FILE")"
   else
-    config_min_template
+    config_min_template | config_migrate_114
   fi
 }
 
@@ -869,7 +896,7 @@ config_ensure_exists() {
   chmod 700 /etc/sing-box 2>/dev/null || true
   if [ ! -e "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
     warn "未发现配置文件，将写入最小模板：$CONFIG_FILE"
-    config_min_template | jq . > "$CONFIG_FILE"
+    config_min_template | config_migrate_114 > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
@@ -880,7 +907,7 @@ config_ensure_exists() {
     broken="${CONFIG_FILE}.broken.${ts}"
     cp -a "$CONFIG_FILE" "$broken" 2>/dev/null || true
     warn "检测到配置文件不是合法 JSON，已备份到：$broken"
-    config_min_template | jq . > "$CONFIG_FILE"
+    config_min_template | config_migrate_114 > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
@@ -1235,6 +1262,9 @@ init_manager_env() {
   has_cmd curl || { err "未找到 curl，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
   has_cmd openssl || { err "未找到 openssl，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
   has_cmd sing-box || { err "未找到 sing-box，请先安装。"; return 1; }
+  local core_version
+  core_version="$(sing-box version | awk '/^sing-box version / {print $3; exit}')"
+  version_ge "$core_version" "1.14.0" || { err "此脚本需要 sing-box 1.14.0 或更新版本，请先在安装/更新菜单升级内核。"; return 1; }
   [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; return 1; }
   config_ensure_exists
   ensure_manager_file_permissions
@@ -1763,28 +1793,28 @@ protocol_transport_layer() {
 
 config_port_in_use_by_layer() {
   local json="$1" port="$2" layer="$3" exclude_tag="${4:-}"
-  if [ "$layer" = "udp" ]; then
-    echo "$json" | jq -e --arg p "$port" --arg ex "$exclude_tag" '
-      .inbounds[]?
-      | select((.listen_port? // empty | tostring) == $p)
-      | select(.type=="tuic")
-      | select(($ex == "") or ((.tag // "") != $ex))
-    ' >/dev/null 2>&1
-  else
-    echo "$json" | jq -e --arg p "$port" --arg ex "$exclude_tag" '
-      .inbounds[]?
-      | select((.listen_port? // empty | tostring) == $p)
-      | select(.type!="tuic")
-      | select(($ex == "") or ((.tag // "") != $ex))
-    ' >/dev/null 2>&1
-  fi
+  echo "$json" | jq -e --arg p "$port" --arg ex "$exclude_tag" --arg layer "$layer" '
+    .inbounds[]?
+    | select((.listen_port? // empty | tostring) == $p)
+    | select(($ex == "") or ((.tag // "") != $ex))
+    | (if .type == "tuic" or .type == "hysteria2" or .type == "hysteria" then ["udp"]
+       elif .type == "shadowsocks" then
+         if (.network // "") == "" then ["tcp","udp"]
+         elif (.network|type) == "array" then .network else (.network|split(",")) end
+       else ["tcp"] end) as $layers
+    | select(($layers | index($layer)) != null)
+  ' >/dev/null 2>&1
 }
 
 port_conflict_for_protocol() {
   local json="$1" proto="$2" port="$3" exclude_tag="${4:-}"
   local layer
   layer="$(protocol_transport_layer "$proto")"
-  config_port_in_use_by_layer "$json" "$port" "$layer" "$exclude_tag"
+  local transport
+  for transport in $layer; do
+    if config_port_in_use_by_layer "$json" "$port" "$transport" "$exclude_tag"; then return 0; fi
+  done
+  return 1
 }
 
 find_inbound_by_entry_key() {
@@ -1899,35 +1929,20 @@ route_rebuild(){
     '
   )" || relay_available_groups_json='[]'
 
-  core_auth_users_json="$({
-    while IFS=$'\x01' read -r entry proto user_name; do
-      [ -n "$user_name" ] || continue
-      if [ "$(user_node_part "$user_name")" = "$entry" ]; then
-        echo "$user_name"
-      fi
-    done < <(echo "$normalized" | jq -r "${JQ_DETECT_PROTOCOL}${JQ_NODE_PART}"'
-      .inbounds[]?
-      | .tag as $entry
-      | (detect_protocol) as $proto
-      | (.users // [])[]?
-      | (.name // .username // "") as $user
-      | [$entry, $proto, $user] | join("\u0001")
-    ')
-  } | awk 'NF' | sort -u | jq -R . | jq -s '.')" || return 1
-
-  relay_pairs_json="$({
-    while IFS=$'\x01' read -r entry relay_user out_tag; do
-      [ -z "${relay_user:-}" ] && continue
-      [ -z "${out_tag:-}" ] && continue
-      if echo "$normalized" | jq -e --arg ot "$out_tag" '.outbounds[]? | select((.tag // "") == $ot)' >/dev/null 2>&1; then
-        jq -n --arg u "$relay_user" --arg o "$out_tag" '{u:$u,o:$o}'
-      fi
-    done < <(relay_list_table "$normalized")
-  } | jq -s 'sort_by(.o, .u) | unique_by(.u)')" || return 1
+  core_auth_users_json="$(echo "$normalized" | jq -c "${JQ_NODE_PART}"'
+    [.inbounds[]? | .tag as $entry | .users[]? | (.name // .username // "")
+      | select(. != "" and node_part(.) == $entry)] | unique
+  ')" || return 1
+  relay_pairs_json="$(relay_list_table "$normalized" | jq -Rsc --argjson config "$normalized" '
+    [$config.outbounds[]?.tag] as $tags
+    | [split("\n")[] | select(length > 0) | split("\u0001")
+       | select(.[1] != "" and .[2] != "") | {u:.[1],o:.[2]}
+       | select(.o as $o | ($tags|index($o)) != null)] | sort_by(.o,.u) | unique_by(.u)
+  ')" || return 1
 
   preserved_rules_json="$(
     echo "$normalized" | jq -c '
-      [ .route.rules[]? | select(.auth_user? == null and .inbound? == null) ]
+      [ .route.rules[]? | select(.auth_user? == null and .inbound? == null and . != {action:"reject"}) ]
     '
   )" || return 1
 
@@ -1937,10 +1952,6 @@ route_rebuild(){
     --argjson kept "$preserved_rules_json" \
     --argjson relay_rule_groups "$relay_available_groups_json" \
     --argjson warp_tags "$warp_available_tags_json" '
-    def auth_key:
-      (((.auth_user // []) | if type == "array" then . else [.] end | sort) | join(","));
-    def rule_set_key:
-      (((.rule_set // []) | if type == "array" then . else [.] end | sort) | join(","));
     .route.rules = (
       ($kept // [])
       + (($relay // []) | group_by(.o) | map({auth_user:(map(.u) | unique | sort), outbound:.[0].o}))
@@ -1977,7 +1988,8 @@ route_rebuild(){
               )
           )
       end
-    | .route.final = "reject"
+    | .route.rules += [{action:"reject"}]
+    | del(.route.final)
   ' || return 1
 }
 
@@ -2886,7 +2898,7 @@ relay_config_project_json() {
           | map((.tag // "") as $tag | select(($managed_tags | index($tag)) == null))
         )
         + (if (($rules | length) > 0 and ($used_landings | length) > 0) then
-            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url, download_detour:"direct"}))
+            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url, http_client:{version:2,detour:"direct"}}))
           else [] end)
       )
     | .outbounds = (
@@ -3247,26 +3259,6 @@ manage_relay_nodes() {
 
 ensure_v2ray_api_proto_files() {
   mkdir -p /etc/sing-box
-  cat > "$V2RAY_PROTO_EXP" <<'EOF_V2E'
-syntax = "proto3";
-package experimental.v2rayapi;
-message GetStatsRequest { string name = 1; bool reset = 2; }
-message Stat { string name = 1; int64 value = 2; }
-message GetStatsResponse { Stat stat = 1; }
-message QueryStatsRequest { string pattern = 1; bool reset = 2; repeated string patterns = 3; bool regexp = 4; }
-message QueryStatsResponse { repeated Stat stat = 1; }
-message SysStatsRequest {}
-message SysStatsResponse {
-  uint32 NumGoroutine = 1; uint32 NumGC = 2; uint64 Alloc = 3; uint64 TotalAlloc = 4;
-  uint64 Sys = 5; uint64 Mallocs = 6; uint64 Frees = 7; uint64 LiveObjects = 8; uint64 PauseTotalNs = 9; uint32 Uptime = 10;
-}
-service StatsService {
-  rpc GetStats (GetStatsRequest) returns (GetStatsResponse);
-  rpc QueryStats (QueryStatsRequest) returns (QueryStatsResponse);
-  rpc GetSysStats (SysStatsRequest) returns (SysStatsResponse);
-}
-EOF_V2E
-
   cat > "$V2RAY_PROTO_V2RAY" <<'EOF_V2V'
 syntax = "proto3";
 package v2ray.core.app.stats.command;
@@ -3693,25 +3685,6 @@ _user_db_cleanup_current_and_save_body() {
 #       50_v2ray_api.sh, 60_user_db.sh
 # ============================================================
 
-migrate_socks_user_object_for_desired() {
-  local inbound="$1" desired="$2" entry_key="$3"
-  [ "$(user_node_part "$desired")" = "$entry_key" ] || return 1
-  local business_user
-  business_user="$(user_business_name "$desired")"
-  echo "$inbound" | jq -c --arg desired "$desired" --arg biz "$business_user" '
-    def node_part($u): if ($u | contains("@")) then ($u | split("@")[0]) else $u end;
-    def business($u): if ($u | contains("@")) then ($u | split("@")[1]) else "admin" end;
-    [
-      (.users // [])[]?
-      | (.username // "") as $u
-      | select($u != "")
-      | select(((node_part($u) | contains("-to-")) | not))
-      | select(business($u) == $biz)
-      | .username = $desired
-    ][0] // empty
-  '
-}
-
 user_manager_apply_to_json() {
   local json="$1" db_json="$2" meta_json="${3:-}"
   local work_json="$json"
@@ -3723,70 +3696,39 @@ user_manager_apply_to_json() {
     inbound="$(find_inbound_by_entry_key "$work_json" "$entry_key")"
     [ -n "$inbound" ] || continue
 
-    local relay_nodes=() relay_node
-    mapfile -t relay_nodes < <(echo "$inbound" | jq -r '.users[]? | (.name // .username // empty)' | while IFS= read -r n; do
-      [ -n "$n" ] || continue
-      np="$(user_node_part "$n")"
-      if [[ "$np" == *"-to-"* && "$np" != "$entry_key" ]]; then
-        echo "$np"
-      fi
-    done | sort -u)
-
-    local credential_base_name="$entry_key"
-
-    local desired_names=()
-    if [ "$proto" != "socks" ] || user_db_user_is_enabled "$db_json" "admin"; then
-      desired_names+=("$credential_base_name")
-    fi
-    local username
-    while IFS= read -r username; do
-      [ -n "$username" ] || continue
-      [ "$username" = "admin" ] && continue
-      if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
-        continue
-      fi
-      if user_db_user_allow_node "$db_json" "$username" "$entry_key"; then
-        desired_names+=("$(node_user_name "$credential_base_name" "$username")")
-      fi
-    done < <(user_db_all_users "$db_json")
-
-    for relay_node in "${relay_nodes[@]}"; do
-      desired_names+=("$relay_node")
-      while IFS= read -r username; do
-        [ -n "$username" ] || continue
-        [ "$username" = "admin" ] && continue
-        if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
-          continue
-        fi
-        if user_db_user_allow_node "$db_json" "$username" "$relay_node"; then
-          desired_names+=("$(node_user_name "$relay_node" "$username")")
-        fi
-      done < <(user_db_all_users "$db_json")
-    done
-
-    local users_tmp
-    users_tmp="$(mktemp)"
-    local desired full_name existing_obj new_obj
-    for desired in "${desired_names[@]}"; do
-      existing_obj="$(find_user_obj_in_inbound "$inbound" "$desired")"
-      if [ -z "$existing_obj" ] && [ "$proto" = "socks" ]; then
-        existing_obj="$(migrate_socks_user_object_for_desired "$inbound" "$desired" "$entry_key" || true)"
-      fi
-      if [ -n "$existing_obj" ]; then
-        echo "$existing_obj" >> "$users_tmp"
-      else
-        new_obj="$(build_user_object_from_inbound "$inbound" "$desired")" || {
-          rm -f "$users_tmp"
-          return 1
-        }
-        echo "$new_obj" >> "$users_tmp"
-      fi
-    done
-    local users_json='[]'
-    if [ -s "$users_tmp" ]; then
-      users_json="$(jq -s '.' "$users_tmp")"
-    fi
-    rm -f "$users_tmp" >/dev/null 2>&1 || true
+    # Plan credentials in one jq pass; only new credentials need external generators.
+    local plan users_json missing desired new_obj
+    plan="$(echo "$inbound" | jq -c --argjson db "$db_json" --arg entry "$entry_key" --arg proto "$proto" "${JQ_NODE_PART}"'
+      def business($n): if ($n|contains("@")) then ($n|split("@")[1]) else "admin" end;
+      . as $ib
+      | [(.users // [])[] | (.name // .username // "") | node_part(.)
+         | select(contains("-to-") and . != $entry)] | unique as $relays
+      | def allowed($node):
+          $db.users | to_entries[] | select(.key != "admin")
+          | select($proto != "socks" or .value.enabled == true)
+          | select(.value.allow_all_nodes == true or ((.value.nodes // []) | index($node)) != null)
+          | $node + "@" + .key;
+      [if $proto != "socks" or $db.users.admin.enabled == true then $entry else empty end,
+       allowed($entry), ($relays[] | . as $node | $node, allowed($node))] as $desired
+      | (reduce ($ib.users // [])[] as $u ({}; .[$u.name // $u.username] //= $u)) as $existing
+      | [$desired[] | . as $name
+          | ($existing[$name] // (if $proto == "socks" and node_part($name) == $entry then
+              [$ib.users[]? | select((.username // "") != "")
+               | select((node_part(.username)|contains("-to-")|not) and business(.username) == business($name))
+               | .username=$name][0] else null end)) as $object
+          | {name:$name,object:$object}]
+    ')" || return 1
+    users_json="$(echo "$plan" | jq -c '[.[].object | select(. != null)]')" || return 1
+    while IFS= read -r desired; do
+      [ -n "$desired" ] || continue
+      new_obj="$(build_user_object_from_inbound "$inbound" "$desired")" || return 1
+      users_json="$(echo "$users_json" | jq -c --argjson obj "$new_obj" '. + [$obj]')" || return 1
+    done < <(echo "$plan" | jq -r '.[] | select(.object == null) | .name')
+    # Match the original desired order, including credentials just created.
+    users_json="$(echo "$users_json" | jq -c --argjson plan "$plan" '
+      (reduce .[] as $u ({}; .[$u.name // $u.username]=$u)) as $by_name
+      | [$plan[].name | $by_name[.]]
+    ')" || return 1
     work_json="$(echo "$work_json" | jq --argjson idx "$idx" --argjson users "$users_json" '.inbounds[$idx].users = $users')" || return 1
   done
 
@@ -7575,7 +7517,7 @@ warp_config_project_json() {
             )
         )
         + (if $ready then
-            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, download_detour:"direct"}))
+            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, http_client:{version:2,detour:"direct"}}))
           else [] end)
       )
     | .outbounds = (
@@ -8042,7 +7984,7 @@ export_configs() {
           ;;
         shadowsocks)
           [ -z "$pass" ] && continue
-          if [ -n "$server_p" ] && [ "$server_p" != "$pass" ]; then pw_out="${server_p}:${pass}"; else pw_out="$pass"; fi
+          if [ -n "$server_p" ]; then pw_out="${server_p}:${pass}"; else pw_out="$pass"; fi
           {
             echo -e "\n${W}[${out_name}]${NC}"
             echo -e " Clash: - {name: \"${out_name}\", type: ss, server: $ip, port: ${port}, cipher: ${method}, password: \"${pw_out}\", udp: true}"
@@ -8073,7 +8015,7 @@ export_configs() {
           [ -z "$uuid" ] && continue
           {
             echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: ${out_name}, type: vmess, server: $ip, port: 443, uuid: ${uuid}, alterId: 0, cipher: auto, udp: true, tls: true, network: ws, servername: ${vm_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${vm_domain}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}}"
+            echo -e " Clash: - {name: ${out_name}, type: vmess, server: $ip, port: 443, uuid: ${uuid}, alterId: 0, cipher: auto, udp: true, tls: true, network: ws, servername: ${vm_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${vm_domain}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}"
             echo ""
             echo -e " Quantumult X: vmess=$ip:443, method=chacha20-poly1305, password=${uuid}, obfs=wss, obfs-host=${vm_domain}, obfs-uri=${path}?ed=2048, fast-open=false, udp-relay=true, tag=${out_name}"
             echo ""
@@ -8087,7 +8029,7 @@ export_configs() {
           [ -z "$uuid" ] && continue
           {
             echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: 443, uuid: ${uuid}, udp: true, tls: true, network: ws, servername: ${ws_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${ws_domain}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}}"
+            echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: 443, uuid: ${uuid}, udp: true, tls: true, network: ws, servername: ${ws_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${ws_domain}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}"
             echo ""
             echo -e " Quantumult X: vless=$ip:443,method=none,password=${uuid},obfs=wss,obfs-host=${ws_domain},obfs-uri=${path}?ed=2048,fast-open=false,udp-relay=true,tag=${out_name}"
             echo ""
@@ -8690,6 +8632,7 @@ install_or_update_singbox() {
     echo -e "最新版本：${G}${latest_ver}${NC}"
     if [ -n "${inst:-}" ] && version_ge "$inst" "$latest_ver"; then
       if is_install_complete; then
+        config_apply "$(config_load)" || { pause; return 1; }
         ok "当前已是最新版本。"
         pause
         return 0
@@ -8819,9 +8762,9 @@ install_candidate_singbox() {
   fi
   next_config="$(mktemp "${CONFIG_FILE}.upgrade.XXXXXX")" || return 1
   if [ "$had_config" = 1 ]; then
-    cat "$CONFIG_FILE" > "$next_config" || return 1
+    config_normalize "$(cat "$CONFIG_FILE")" > "$next_config" || { rm -f "$next_config"; return 1; }
   else
-    config_min_template > "$next_config" || return 1
+    config_normalize "$(config_min_template)" > "$next_config" || { rm -f "$next_config"; return 1; }
   fi
   if ! "$candidate" check -c "$next_config"; then
     rm -f "$next_config"

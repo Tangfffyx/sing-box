@@ -62,28 +62,28 @@ protocol_transport_layer() {
 
 config_port_in_use_by_layer() {
   local json="$1" port="$2" layer="$3" exclude_tag="${4:-}"
-  if [ "$layer" = "udp" ]; then
-    echo "$json" | jq -e --arg p "$port" --arg ex "$exclude_tag" '
-      .inbounds[]?
-      | select((.listen_port? // empty | tostring) == $p)
-      | select(.type=="tuic")
-      | select(($ex == "") or ((.tag // "") != $ex))
-    ' >/dev/null 2>&1
-  else
-    echo "$json" | jq -e --arg p "$port" --arg ex "$exclude_tag" '
-      .inbounds[]?
-      | select((.listen_port? // empty | tostring) == $p)
-      | select(.type!="tuic")
-      | select(($ex == "") or ((.tag // "") != $ex))
-    ' >/dev/null 2>&1
-  fi
+  echo "$json" | jq -e --arg p "$port" --arg ex "$exclude_tag" --arg layer "$layer" '
+    .inbounds[]?
+    | select((.listen_port? // empty | tostring) == $p)
+    | select(($ex == "") or ((.tag // "") != $ex))
+    | (if .type == "tuic" or .type == "hysteria2" or .type == "hysteria" then ["udp"]
+       elif .type == "shadowsocks" then
+         if (.network // "") == "" then ["tcp","udp"]
+         elif (.network|type) == "array" then .network else (.network|split(",")) end
+       else ["tcp"] end) as $layers
+    | select(($layers | index($layer)) != null)
+  ' >/dev/null 2>&1
 }
 
 port_conflict_for_protocol() {
   local json="$1" proto="$2" port="$3" exclude_tag="${4:-}"
   local layer
   layer="$(protocol_transport_layer "$proto")"
-  config_port_in_use_by_layer "$json" "$port" "$layer" "$exclude_tag"
+  local transport
+  for transport in $layer; do
+    if config_port_in_use_by_layer "$json" "$port" "$transport" "$exclude_tag"; then return 0; fi
+  done
+  return 1
 }
 
 find_inbound_by_entry_key() {
@@ -198,35 +198,20 @@ route_rebuild(){
     '
   )" || relay_available_groups_json='[]'
 
-  core_auth_users_json="$({
-    while IFS=$'\x01' read -r entry proto user_name; do
-      [ -n "$user_name" ] || continue
-      if [ "$(user_node_part "$user_name")" = "$entry" ]; then
-        echo "$user_name"
-      fi
-    done < <(echo "$normalized" | jq -r "${JQ_DETECT_PROTOCOL}${JQ_NODE_PART}"'
-      .inbounds[]?
-      | .tag as $entry
-      | (detect_protocol) as $proto
-      | (.users // [])[]?
-      | (.name // .username // "") as $user
-      | [$entry, $proto, $user] | join("\u0001")
-    ')
-  } | awk 'NF' | sort -u | jq -R . | jq -s '.')" || return 1
-
-  relay_pairs_json="$({
-    while IFS=$'\x01' read -r entry relay_user out_tag; do
-      [ -z "${relay_user:-}" ] && continue
-      [ -z "${out_tag:-}" ] && continue
-      if echo "$normalized" | jq -e --arg ot "$out_tag" '.outbounds[]? | select((.tag // "") == $ot)' >/dev/null 2>&1; then
-        jq -n --arg u "$relay_user" --arg o "$out_tag" '{u:$u,o:$o}'
-      fi
-    done < <(relay_list_table "$normalized")
-  } | jq -s 'sort_by(.o, .u) | unique_by(.u)')" || return 1
+  core_auth_users_json="$(echo "$normalized" | jq -c "${JQ_NODE_PART}"'
+    [.inbounds[]? | .tag as $entry | .users[]? | (.name // .username // "")
+      | select(. != "" and node_part(.) == $entry)] | unique
+  ')" || return 1
+  relay_pairs_json="$(relay_list_table "$normalized" | jq -Rsc --argjson config "$normalized" '
+    [$config.outbounds[]?.tag] as $tags
+    | [split("\n")[] | select(length > 0) | split("\u0001")
+       | select(.[1] != "" and .[2] != "") | {u:.[1],o:.[2]}
+       | select(.o as $o | ($tags|index($o)) != null)] | sort_by(.o,.u) | unique_by(.u)
+  ')" || return 1
 
   preserved_rules_json="$(
     echo "$normalized" | jq -c '
-      [ .route.rules[]? | select(.auth_user? == null and .inbound? == null) ]
+      [ .route.rules[]? | select(.auth_user? == null and .inbound? == null and . != {action:"reject"}) ]
     '
   )" || return 1
 
@@ -236,10 +221,6 @@ route_rebuild(){
     --argjson kept "$preserved_rules_json" \
     --argjson relay_rule_groups "$relay_available_groups_json" \
     --argjson warp_tags "$warp_available_tags_json" '
-    def auth_key:
-      (((.auth_user // []) | if type == "array" then . else [.] end | sort) | join(","));
-    def rule_set_key:
-      (((.rule_set // []) | if type == "array" then . else [.] end | sort) | join(","));
     .route.rules = (
       ($kept // [])
       + (($relay // []) | group_by(.o) | map({auth_user:(map(.u) | unique | sort), outbound:.[0].o}))
@@ -276,7 +257,8 @@ route_rebuild(){
               )
           )
       end
-    | .route.final = "reject"
+    | .route.rules += [{action:"reject"}]
+    | del(.route.final)
   ' || return 1
 }
 

@@ -1,6 +1,6 @@
-# 6.1.8 验收清单
+# 6.1.9 验收清单
 
-先在测试 VPS 上做以下验证，再更新正式节点。GitHub CI 验证自动化场景，VPS 验收确认实际系统服务、网络和客户端行为。
+维护者可按下列步骤复验；6.1.9 已完成的自动化和实机结果见 [验证结果](VALIDATION-6.1.9.md)。GitHub CI 验证自动化场景，VPS 验收确认实际系统服务、网络和客户端行为。
 
 ## 1. 自动化检查
 
@@ -12,7 +12,7 @@ bash tests/check.sh
 
 需要 Bash、jq、Python 3；Linux 上还需要 flock。CI 在 Ubuntu/Alpine 执行相同回归，并编译带 V2Ray API 的 sing-box 1.14.2，验证实际 SOCKS 放行/拒绝及重启前后流量累计。
 
-macOS 的 Bash 3 会跳过真实 flock 和 /proc 进程测试。systemd/OpenRC 操作由回归中的模拟命令覆盖，必须继续在实际 VPS 上验收。
+macOS 的 Bash 3 会跳过真实 flock 和 /proc 进程测试。systemd 另有独立真实服务测试；各环境覆盖情况以验证记录为准。
 
 ## 2. 更新前留存
 
@@ -22,7 +22,7 @@ macOS 的 Bash 3 会跳过真实 flock 和 /proc 进程测试。systemd/OpenRC �
 
 ## 3. 检查真实运行版本与服务
 
-更新脚本后，脚本版本应为 6.1.8；内核版本与脚本版本是两个不同的数字。
+更新脚本后，脚本版本应为 6.1.9；内核版本与脚本版本是两个不同的数字。
 
 Debian/Ubuntu（systemd）：
 
@@ -91,7 +91,7 @@ tail -n 100 /var/log/sing-box/access.log
 
 账期的“错过重置日、跨年、闰年月底、重复执行不重置、新用户建账”由回归夹具覆盖。正式 VPS 不要为了测试而修改系统时间。
 
-升级失败回滚在自动化夹具中通过候选内核启动失败、候选配置检查失败模拟。实际首次部署可在可恢复的测试机上验收升级；成功后应保留：
+升级失败回滚由夹具以及真实 systemd 候选启动失败测试覆盖。实际首次部署可在可恢复的测试机上验收升级；成功后应保留：
 
 - `/usr/local/bin/sing-box.bak`：上一版内核。
 - `/etc/sing-box/config.json.bak.upgrade`：升级前配置。

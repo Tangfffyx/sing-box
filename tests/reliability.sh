@@ -31,7 +31,7 @@ test_routes() {
   local config result again
   config='{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"rules":[{"domain_suffix":["a.example"],"outbound":"direct"},{"domain_suffix":["b.example"],"outbound":"direct"},{"ip_cidr":["192.0.2.0/24"],"action":"reject"},{"port":25,"action":"reject"}]}}'
   result="$(route_rebuild "$config" '{}')"
-  assert_json "$result" '.route.rules|length == 4'
+  assert_json "$result" '.route.rules|length == 5'
   assert_json "$result" '.route.rules[1].domain_suffix == ["b.example"]'
   again="$(route_rebuild "$result" '{}')"
   [ "$(echo "$again"|jq -Sc .)" = "$(echo "$result"|jq -Sc .)" ]

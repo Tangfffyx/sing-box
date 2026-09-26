@@ -35,7 +35,7 @@ jq -n --argjson socks "$socks_port" --arg api "$V2RAY_API_LISTEN" '{
  outbounds:[{type:"direct",tag:"direct"},{type:"block",tag:"reject"}],
  route:{rules:[{auth_user:"node@alice",outbound:"direct"}],final:"reject"},
  experimental:{v2ray_api:{listen:$api,stats:{enabled:true,users:["node@alice"]}}}
-}' > "$TMP_SMOKE/config.json"
+}' | config_migrate_114 > "$TMP_SMOKE/config.json"
 "$CORE" check -c "$TMP_SMOKE/config.json"
 dd if=/dev/zero of="$TMP_SMOKE/payload" bs=65536 count=1 2>/dev/null
 python3 -m http.server "$http_port" --bind 127.0.0.1 --directory "$TMP_SMOKE" > "$TMP_SMOKE/http.log" 2>&1 &
