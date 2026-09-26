@@ -165,8 +165,9 @@ show_user_allowed_nodes() {
 }
 
 user_add_menu() {
-  local db_json json username quota reset_day expire_at ans nodes_json allow_all_json
+  local db_json json username quota reset_day expire_at ans nodes_json allow_all_json before_db
   db_json="$(user_db_load)"
+  before_db="$db_json"
   json="$(config_load)"
   clear
   print_rect_title "新增用户"
@@ -216,7 +217,7 @@ user_add_menu() {
       nodes: $nodes
     }
   ')"
-  user_manager_apply_changes "$db_json" "$json" || { pause; return 1; }
+  user_manager_commit_edit "$before_db" "$db_json" || { pause; return 1; }
   pause
 }
 
@@ -224,9 +225,6 @@ user_manage_permission_menu() {
   local db_json="$1" username="$2" json="$3"
   local cleaned_db_json
   cleaned_db_json="$(user_db_cleanup_missing_nodes "$db_json" "$json")" || cleaned_db_json="$db_json"
-  if [ "$(echo "$cleaned_db_json" | jq -c . 2>/dev/null)" != "$(echo "$db_json" | jq -c . 2>/dev/null)" ]; then
-    user_db_save "$cleaned_db_json" || return 1
-  fi
   db_json="$cleaned_db_json"
   local current_nodes_json
   local nodes=() node i raw picks=() invalid=0 sel idx selected_json new_db
@@ -383,8 +381,6 @@ user_add_usage_menu() {
 
 user_reset_usage_menu() {
   local db_json="$1" username="$2"
-  sync_user_usage_counters || true
-  db_json="$(user_db_load)"
   clear >&2
   print_rect_title "手动重置流量" >&2
   show_user_status_table "$db_json" >&2
@@ -435,8 +431,6 @@ user_renew_menu() {
   local db_json="$1" username="$2"
   local current_expire today base_date expired=0 choice months custom_months new_expire
 
-  sync_user_usage_counters || true
-  db_json="$(user_db_load)"
   clear >&2
   print_rect_title "一键续期" >&2
   show_user_status_table "$db_json" >&2
@@ -515,9 +509,10 @@ user_renew_menu() {
 
 user_manage_single() {
   local username="$1"
-  local db_json json act new_db is_admin=0
+  local db_json json act new_db mode is_admin=0
   [ "$username" = "admin" ] && is_admin=1
   while true; do
+    sync_user_usage_counters || return 1
     db_json="$(user_db_load)"
     json="$(config_load)"
     clear
@@ -541,7 +536,7 @@ user_manage_single() {
         else
           new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')"
         fi
-        user_manager_apply_changes "$new_db" "$json" || true
+        user_manager_commit_edit "$db_json" "$new_db" edit "$username" || true
         ;;
       2)
         if [ $is_admin -eq 1 ]; then
@@ -549,32 +544,34 @@ user_manage_single() {
         else
           new_db="$(user_manage_permission_menu "$db_json" "$username" "$json")" || new_db=""
           if json_is_object "$new_db"; then
-            user_manager_apply_changes "$new_db" "$json" || true
+            user_manager_commit_edit "$db_json" "$new_db" edit "$username" || true
           fi
         fi
         ;;
       3)
         new_db="$(user_manage_package_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+          user_manager_commit_edit "$db_json" "$new_db" edit "$username" || true
         fi
         ;;
       4)
         new_db="$(user_reset_usage_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+          user_manager_commit_edit "$db_json" "$new_db" reset "$username" || true
         fi
         ;;
       5)
         new_db="$(user_add_usage_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+          user_manager_commit_edit "$db_json" "$new_db" add "$username" || true
         fi
         ;;
       6)
+        mode=edit
+        if user_expire_is_past "$(user_today_date)" "$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"; then mode=reset; fi
         new_db="$(user_renew_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+          user_manager_commit_edit "$db_json" "$new_db" "$mode" "$username" || true
         fi
         ;;
       0|q|Q|"") return 0 ;;
@@ -649,7 +646,7 @@ user_delete_menu() {
   for username in "${names_to_delete[@]}"; do
     new_db="$(echo "$new_db" | jq --arg u "$username" 'del(.users[$u])')" || return 1
   done
-  user_manager_apply_changes "$new_db" "$json" || true
+  user_manager_commit_edit "$db_json" "$new_db" || true
   pause
 }
 

@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.1.7"
+SCRIPT_VERSION="6.1.9"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -20,7 +20,6 @@ SINGBOX_BIN="${SINGBOX_INSTALL_DIR}/sing-box"
 SINGBOX_VERSION_STAMP="/etc/sing-box/.installed_release"
 GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
-V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
 USER_WATCH_CRON_MARK="sb.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
@@ -171,21 +170,16 @@ declare -A PROTO_PREFIX=(
   [socks]=socks
 )
 
-declare -A PREFIX_TO_PROTO=(
-  [reality]=vless-reality
-  [anytls]=anytls
-  [ss]=shadowsocks
-  [trojan]=trojan
-  [vmess-ws]=vmess-ws
-  [vless-ws]=vless-ws
-  [tuic]=tuic
-  [socks]=socks
-)
+declare -A PREFIX_TO_PROTO=()
+for proto in "${SUPPORTED_PROTOCOLS[@]}"; do
+  PREFIX_TO_PROTO["${PROTO_PREFIX[$proto]}"]="$proto"
+done
+unset proto
 
 declare -A PROTO_TRANSPORT=(
   [vless-reality]=tcp
   [anytls]=tcp
-  [shadowsocks]=tcp
+  [shadowsocks]="tcp udp"
   [trojan]=tcp
   [vmess-ws]=tcp
   [vless-ws]=tcp

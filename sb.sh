@@ -4,7 +4,6 @@
 # Sing-box Elite Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
 # 源码位于 lib/ 目录下的各模块文件
-# 构建时间: 2026-05-13 16:16:03 UTC
 # ============================================================
 
 
@@ -17,7 +16,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.1.7"
+SCRIPT_VERSION="6.1.9"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -30,7 +29,6 @@ SINGBOX_BIN="${SINGBOX_INSTALL_DIR}/sing-box"
 SINGBOX_VERSION_STAMP="/etc/sing-box/.installed_release"
 GRPCURL_BIN="/usr/local/bin/grpcurl"
 V2RAY_API_LISTEN="127.0.0.1:18080"
-V2RAY_PROTO_EXP="/etc/sing-box/v2rayapi-experimental.proto"
 V2RAY_PROTO_V2RAY="/etc/sing-box/v2rayapi-v2ray.proto"
 USER_WATCH_CRON_MARK="sb.sh --user-watch"
 USER_WATCH_CRON_SCHEDULE="*/5 * * * *"
@@ -181,21 +179,16 @@ declare -A PROTO_PREFIX=(
   [socks]=socks
 )
 
-declare -A PREFIX_TO_PROTO=(
-  [reality]=vless-reality
-  [anytls]=anytls
-  [ss]=shadowsocks
-  [trojan]=trojan
-  [vmess-ws]=vmess-ws
-  [vless-ws]=vless-ws
-  [tuic]=tuic
-  [socks]=socks
-)
+declare -A PREFIX_TO_PROTO=()
+for proto in "${SUPPORTED_PROTOCOLS[@]}"; do
+  PREFIX_TO_PROTO["${PROTO_PREFIX[$proto]}"]="$proto"
+done
+unset proto
 
 declare -A PROTO_TRANSPORT=(
   [vless-reality]=tcp
   [anytls]=tcp
-  [shadowsocks]=tcp
+  [shadowsocks]="tcp udp"
   [trojan]=tcp
   [vmess-ws]=tcp
   [vless-ws]=tcp
@@ -803,8 +796,7 @@ JSON
 config_normalize() {
   local json="$1"
   if [ -z "$json" ]; then
-    config_min_template
-    return 0
+    json="$(config_min_template)"
   fi
   echo "$json" | jq '
     if type != "object" then
@@ -831,7 +823,7 @@ config_normalize() {
           | map(
               if ((.type // "") == "remote" and (((.tag // "") | startswith("warp-geosite-")) or ((.tag // "") | startswith("relay-geosite-")))) then
                 .format = (.format // "binary")
-                | .download_detour = "direct"
+
               else .
               end
             )
@@ -854,6 +846,40 @@ config_normalize() {
     | .experimental.cache_file.enabled = true
     | if (.outbounds | any((.tag // "")=="direct")) then . else .outbounds += [{"type":"direct","tag":"direct"}] end
     | if (.outbounds | any((.tag // "")=="reject")) then . else .outbounds += [{"type":"block","tag":"reject"}] end
+  ' | config_migrate_114
+
+}
+
+# Canonical 1.14 format. Preserve custom download detours and direct dialer options.
+config_migrate_114() {
+  jq '
+    . as $root
+    | def client($tag):
+        ([$root.outbounds[]? | select(.tag == $tag)][0]) as $out
+        | if $out.type == "direct" and ($out | del(.type,.tag) | length) == 0
+          then {version:2} else {version:2,detour:$tag} end;
+    .route.rule_set |= (if . == null then . else map(
+      if .type == "remote" then
+        if (.http_client? == null) then
+          .http_client = (if (.download_detour // "") != "" then client(.download_detour)
+            elif ($root.http_clients // [] | length) > 0 or ($root.route.default_http_client // "") != "" then null
+            else client(if ($root.route.final // "reject") == "reject" then "direct" else $root.route.final end) end)
+        else . end
+        | del(.download_detour)
+        | if .http_client == null then del(.http_client)
+          elif (.http_client|type) == "object" and (.http_client.detour // "") != "" then
+            .http_client as $c | client($c.detour) as $base
+            | if $base.detour? == null then .http_client |= del(.detour) else . end
+          else . end
+      else . end) end)
+    | if .route.rule_set == null then del(.route.rule_set) else . end
+    | [.outbounds[]? | select(.type == "block") | .tag] as $blocks
+    | .route.rules |= map(walk(if type == "object" and .outbound? != null
+        then .outbound as $o | if ($blocks|index($o)) != null then del(.outbound) | .action="reject" else . end
+        else . end))
+    | .outbounds |= map(select(.type != "block"))
+    | del(.route.final)
+    | .route.rules = ([.route.rules[]? | select(. != {action:"reject"})] + [{action:"reject"}])
   '
 }
 
@@ -861,7 +887,7 @@ config_load() {
   if [ -s "$CONFIG_FILE" ] && jq -e . "$CONFIG_FILE" >/dev/null 2>&1; then
     config_normalize "$(cat "$CONFIG_FILE")"
   else
-    config_min_template
+    config_min_template | config_migrate_114
   fi
 }
 
@@ -870,7 +896,7 @@ config_ensure_exists() {
   chmod 700 /etc/sing-box 2>/dev/null || true
   if [ ! -e "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
     warn "未发现配置文件，将写入最小模板：$CONFIG_FILE"
-    config_min_template | jq . > "$CONFIG_FILE"
+    config_min_template | config_migrate_114 > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
@@ -881,7 +907,7 @@ config_ensure_exists() {
     broken="${CONFIG_FILE}.broken.${ts}"
     cp -a "$CONFIG_FILE" "$broken" 2>/dev/null || true
     warn "检测到配置文件不是合法 JSON，已备份到：$broken"
-    config_min_template | jq . > "$CONFIG_FILE"
+    config_min_template | config_migrate_114 > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
@@ -951,57 +977,58 @@ openrc_stop_service() {
   rc-service "$service" stop
 }
 
-reload_or_restart_singbox_safe() {
-  if ! check_config_or_print; then
-    err "已阻止热载：请先修复配置。"
-    return 1
-  fi
-  local quiet="${_RESTART_SINGBOX_QUIET_OK:-0}" action=""
+# HUP 会在原进程中重建实例；这里明确重启并验证新的进程，兼顾升级与计费代次。
+singbox_process_token() {
+  local pid stat boot
   case "$INIT_SYSTEM" in
-    systemd)
-      if [ "$quiet" = "1" ]; then
-        if systemctl reload sing-box >/dev/null 2>&1; then
-          action="热载"
-        elif systemctl restart sing-box >/dev/null 2>&1; then
-          action="重启"
-        else
-          return 1
-        fi
-      else
-        if systemctl reload sing-box 2>/dev/null; then
-          action="热载"
-        elif systemctl restart sing-box; then
-          action="重启"
-        else
-          return 1
-        fi
-      fi
-      ;;
-    openrc)
-      if [ "$quiet" = "1" ]; then
-        if rc-service sing-box reload >/dev/null 2>&1; then
-          action="热载"
-        elif rc-service sing-box restart >/dev/null 2>&1; then
-          action="重启"
-        else
-          return 1
-        fi
-      else
-        if rc-service sing-box reload 2>/dev/null; then
-          action="热载"
-        elif rc-service sing-box restart; then
-          action="重启"
-        else
-          return 1
-        fi
-      fi
-      ;;
-    *)
-      err "未识别的 init 系统，无法热载 sing-box。"
-      return 1
-      ;;
+    systemd) pid="$(systemctl show sing-box -p MainPID --value 2>/dev/null)" || return 1 ;;
+    openrc) pid="$(cat /run/sing-box.pid 2>/dev/null)" || return 1 ;;
+    *) return 1 ;;
   esac
-  [ "$quiet" = "1" ] || ok "sing-box 已${action}。"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+  # comm 字段可以包含空格及括号；删到最后一个右括号后再取 starttime。
+  stat="${stat##*) }"
+  stat="$(printf '%s\n' "$stat" | awk '{print $20}')"
+  [[ "$stat" =~ ^[0-9]+$ ]] || return 1
+  boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+  printf '%s:%s:%s\n' "$boot" "$pid" "$stat"
+}
+
+wait_singbox_ready() {
+  local old_token="${1:-}" token="" last_token="" stable=0 attempt api_enabled
+  api_enabled="$(jq -r '.experimental.v2ray_api.stats.enabled // false' "$CONFIG_FILE")" || return 1
+  for ((attempt=0; attempt<20; attempt++)); do
+    token="$(singbox_process_token 2>/dev/null)" || token=""
+    if singbox_service_active && [ -n "$token" ] && [ "$token" != "$old_token" ]; then
+      if [ "$api_enabled" != true ] || query_v2ray_api_uptime >/dev/null 2>&1; then
+        if [ "$token" = "$last_token" ]; then stable=$((stable + 1)); else stable=1; fi
+        last_token="$token"
+        [ "$stable" -ge 3 ] && return 0
+      else
+        stable=0
+      fi
+    else
+      stable=0
+    fi
+    sleep 1
+  done
+  err "sing-box 未在期限内稳定启动或统计 API 不可用。"
+  return 1
+}
+
+reload_or_restart_singbox_safe() {
+  check_config_or_print || return 1
+  local old_token quiet="${_RESTART_SINGBOX_QUIET_OK:-0}"
+  old_token="$(singbox_process_token 2>/dev/null)" || old_token=""
+  case "$INIT_SYSTEM" in
+    systemd) systemctl restart sing-box >/dev/null 2>&1 || return 1 ;;
+    openrc) rc-service sing-box restart >/dev/null 2>&1 || return 1 ;;
+    *) err "未识别的 init 系统，无法重启 sing-box。"; return 1 ;;
+  esac
+  wait_singbox_ready "$old_token" || return 1
+  [ "$quiet" = "1" ] || ok "sing-box 已重启并通过运行检查。"
+  return 0
 }
 
 enable_now_singbox_safe() {
@@ -1040,7 +1067,8 @@ with_manager_lock() {
   fi
 
   if ! has_cmd flock; then
-    if "$@"; then return 0; else return $?; fi
+    err "缺少 flock，已阻止无锁写入；请先安装 util-linux（Alpine: flock）。"
+    return 1
   fi
 
   mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
@@ -1057,11 +1085,12 @@ with_manager_lock() {
       { exec {_lock_fd}>&-; } 2>/dev/null || true
     else
       { exec {_lock_fd}>&-; } 2>/dev/null || true
-      if "$@"; then _rc=0; else _rc=$?; fi
+      err "获取管理锁失败，未执行写入。"
+      _rc=1
     fi
   else
-    # 锁文件不可创建时降级为无锁模式（不阻塞功能）
-    if "$@"; then _rc=0; else _rc=$?; fi
+    err "无法创建管理锁：$SB_LOCK_FILE，未执行写入。"
+    _rc=1
   fi
   return $_rc
 }
@@ -1116,12 +1145,17 @@ _config_apply_body() {
     return 1
   fi
 
+  if [ "${_CONFIG_FORCE_RESTART:-0}" != "1" ] && [ -s "$CONFIG_FILE" ] && singbox_service_active; then
+    if [ "$(printf '%s' "$normalized" | jq -Sc .)" = "$(jq -Sc . "$CONFIG_FILE")" ]; then
+      return 0
+    fi
+  fi
   if [ "${_CONFIG_SKIP_USAGE_SYNC:-0}" != "1" ]; then
-    sync_user_usage_counters || true
+    sync_user_usage_counters || return 1
   fi
 
   local tmp_file
-  tmp_file="$(mktemp /etc/sing-box/config.json.tmp.XXXXXX)" || {
+  tmp_file="$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")" || {
     err "创建临时配置文件失败。"
     return 1
   }
@@ -1148,7 +1182,7 @@ _config_apply_body() {
   local ts backup prev_tmp
   ts="$(date +%Y%m%d_%H%M%S)"
   backup="/etc/sing-box/config.json.bak.fail.$ts"
-  prev_tmp="$(mktemp /etc/sing-box/config.json.prev.XXXXXX)" || {
+  prev_tmp="$(mktemp "${CONFIG_FILE}.prev.XXXXXX")" || {
     err "创建回滚临时文件失败。"
     rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
@@ -1228,6 +1262,9 @@ init_manager_env() {
   has_cmd curl || { err "未找到 curl，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
   has_cmd openssl || { err "未找到 openssl，请先安装/更新 sing-box（会自动装依赖）。"; return 1; }
   has_cmd sing-box || { err "未找到 sing-box，请先安装。"; return 1; }
+  local core_version
+  core_version="$(sing-box version | awk '/^sing-box version / {print $3; exit}')"
+  version_ge "$core_version" "1.14.0" || { err "此脚本需要 sing-box 1.14.0 或更新版本，请先在安装/更新菜单升级内核。"; return 1; }
   [ "$INIT_SYSTEM" = "unknown" ] && { err "未识别的 init 系统（需要 systemd 或 OpenRC）。"; return 1; }
   config_ensure_exists
   ensure_manager_file_permissions
@@ -1756,28 +1793,28 @@ protocol_transport_layer() {
 
 config_port_in_use_by_layer() {
   local json="$1" port="$2" layer="$3" exclude_tag="${4:-}"
-  if [ "$layer" = "udp" ]; then
-    echo "$json" | jq -e --arg p "$port" --arg ex "$exclude_tag" '
-      .inbounds[]?
-      | select((.listen_port? // empty | tostring) == $p)
-      | select(.type=="tuic")
-      | select(($ex == "") or ((.tag // "") != $ex))
-    ' >/dev/null 2>&1
-  else
-    echo "$json" | jq -e --arg p "$port" --arg ex "$exclude_tag" '
-      .inbounds[]?
-      | select((.listen_port? // empty | tostring) == $p)
-      | select(.type!="tuic")
-      | select(($ex == "") or ((.tag // "") != $ex))
-    ' >/dev/null 2>&1
-  fi
+  echo "$json" | jq -e --arg p "$port" --arg ex "$exclude_tag" --arg layer "$layer" '
+    .inbounds[]?
+    | select((.listen_port? // empty | tostring) == $p)
+    | select(($ex == "") or ((.tag // "") != $ex))
+    | (if .type == "tuic" or .type == "hysteria2" or .type == "hysteria" then ["udp"]
+       elif .type == "shadowsocks" then
+         if (.network // "") == "" then ["tcp","udp"]
+         elif (.network|type) == "array" then .network else (.network|split(",")) end
+       else ["tcp"] end) as $layers
+    | select(($layers | index($layer)) != null)
+  ' >/dev/null 2>&1
 }
 
 port_conflict_for_protocol() {
   local json="$1" proto="$2" port="$3" exclude_tag="${4:-}"
   local layer
   layer="$(protocol_transport_layer "$proto")"
-  config_port_in_use_by_layer "$json" "$port" "$layer" "$exclude_tag"
+  local transport
+  for transport in $layer; do
+    if config_port_in_use_by_layer "$json" "$port" "$transport" "$exclude_tag"; then return 0; fi
+  done
+  return 1
 }
 
 find_inbound_by_entry_key() {
@@ -1892,35 +1929,20 @@ route_rebuild(){
     '
   )" || relay_available_groups_json='[]'
 
-  core_auth_users_json="$({
-    while IFS=$'\x01' read -r entry proto user_name; do
-      [ -n "$user_name" ] || continue
-      if [ "$(user_node_part "$user_name")" = "$entry" ]; then
-        echo "$user_name"
-      fi
-    done < <(echo "$normalized" | jq -r "${JQ_DETECT_PROTOCOL}${JQ_NODE_PART}"'
-      .inbounds[]?
-      | .tag as $entry
-      | (detect_protocol) as $proto
-      | (.users // [])[]?
-      | (.name // .username // "") as $user
-      | [$entry, $proto, $user] | join("\u0001")
-    ')
-  } | awk 'NF' | sort -u | jq -R . | jq -s '.')" || return 1
-
-  relay_pairs_json="$({
-    while IFS=$'\x01' read -r entry relay_user out_tag; do
-      [ -z "${relay_user:-}" ] && continue
-      [ -z "${out_tag:-}" ] && continue
-      if echo "$normalized" | jq -e --arg ot "$out_tag" '.outbounds[]? | select((.tag // "") == $ot)' >/dev/null 2>&1; then
-        jq -n --arg u "$relay_user" --arg o "$out_tag" '{u:$u,o:$o}'
-      fi
-    done < <(relay_list_table "$normalized")
-  } | jq -s 'sort_by(.o, .u) | unique_by(.u)')" || return 1
+  core_auth_users_json="$(echo "$normalized" | jq -c "${JQ_NODE_PART}"'
+    [.inbounds[]? | .tag as $entry | .users[]? | (.name // .username // "")
+      | select(. != "" and node_part(.) == $entry)] | unique
+  ')" || return 1
+  relay_pairs_json="$(relay_list_table "$normalized" | jq -Rsc --argjson config "$normalized" '
+    [$config.outbounds[]?.tag] as $tags
+    | [split("\n")[] | select(length > 0) | split("\u0001")
+       | select(.[1] != "" and .[2] != "") | {u:.[1],o:.[2]}
+       | select(.o as $o | ($tags|index($o)) != null)] | sort_by(.o,.u) | unique_by(.u)
+  ')" || return 1
 
   preserved_rules_json="$(
     echo "$normalized" | jq -c '
-      [ .route.rules[]? | select(.auth_user? == null and .inbound? == null) ]
+      [ .route.rules[]? | select(.auth_user? == null and .inbound? == null and . != {action:"reject"}) ]
     '
   )" || return 1
 
@@ -1930,10 +1952,6 @@ route_rebuild(){
     --argjson kept "$preserved_rules_json" \
     --argjson relay_rule_groups "$relay_available_groups_json" \
     --argjson warp_tags "$warp_available_tags_json" '
-    def auth_key:
-      (((.auth_user // []) | if type == "array" then . else [.] end | sort) | join(","));
-    def rule_set_key:
-      (((.rule_set // []) | if type == "array" then . else [.] end | sort) | join(","));
     .route.rules = (
       ($kept // [])
       + (($relay // []) | group_by(.o) | map({auth_user:(map(.u) | unique | sort), outbound:.[0].o}))
@@ -1941,14 +1959,8 @@ route_rebuild(){
       + (if (($core_auth | length) > 0 and ($warp_tags | length) > 0) then [{auth_user:($core_auth | unique | sort),rule_set:$warp_tags,outbound:"warp"}] else [] end)
       + (if ($core_auth | length) > 0 then [{auth_user:($core_auth | unique | sort),outbound:"direct"}] else [] end)
     )
-    | .route.rules |= (
-        (reduce .[] as $r ({seen:{}, out:[]};
-          ($r | ((.outbound // "") + "|" + auth_key + "|" + rule_set_key)) as $key
-          | if .seen[$key] then .
-            else .seen[$key] = true | .out += [$r]
-            end
-        ) | .out)
-      )
+    # 保留规则的完整条件和顺序；生成的用户列表已在上面 unique。
+    # 不可用 outbound/auth_user/rule_set 三字段对用户规则做全局去重。
     | . as $root
     | .outbounds |= map(
         (.tag // "") as $tag
@@ -1976,7 +1988,8 @@ route_rebuild(){
               )
           )
       end
-    | .route.final = "reject"
+    | .route.rules += [{action:"reject"}]
+    | del(.route.final)
   ' || return 1
 }
 
@@ -2606,7 +2619,7 @@ relay_add() {
     sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
-    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$meta_json"; then
+    if _USER_KEEP_LATEST_DB=1 _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$meta_json"; then
       _relay_ok=1
     fi
   else
@@ -2885,7 +2898,7 @@ relay_config_project_json() {
           | map((.tag // "") as $tag | select(($managed_tags | index($tag)) == null))
         )
         + (if (($rules | length) > 0 and ($used_landings | length) > 0) then
-            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url, download_detour:"direct"}))
+            ($rules | map(. as $rule | select(($used_landings | index($rule.landing_id // "")) != null) | {type:"remote", tag:$rule.tag, format:"binary", url:$rule.url, http_client:{version:2,detour:"direct"}}))
           else [] end)
       )
     | .outbounds = (
@@ -3161,7 +3174,7 @@ relay_delete() {
     sync_user_usage_counters || true
     db_json="$(user_db_load)"
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$final_json")"
-    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" "$meta_json"; then
+    if _USER_KEEP_LATEST_DB=1 _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" "$meta_json"; then
       _delete_ok=1
     fi
   else
@@ -3246,26 +3259,6 @@ manage_relay_nodes() {
 
 ensure_v2ray_api_proto_files() {
   mkdir -p /etc/sing-box
-  cat > "$V2RAY_PROTO_EXP" <<'EOF_V2E'
-syntax = "proto3";
-package experimental.v2rayapi;
-message GetStatsRequest { string name = 1; bool reset = 2; }
-message Stat { string name = 1; int64 value = 2; }
-message GetStatsResponse { Stat stat = 1; }
-message QueryStatsRequest { string pattern = 1; bool reset = 2; repeated string patterns = 3; bool regexp = 4; }
-message QueryStatsResponse { repeated Stat stat = 1; }
-message SysStatsRequest {}
-message SysStatsResponse {
-  uint32 NumGoroutine = 1; uint32 NumGC = 2; uint64 Alloc = 3; uint64 TotalAlloc = 4;
-  uint64 Sys = 5; uint64 Mallocs = 6; uint64 Frees = 7; uint64 LiveObjects = 8; uint64 PauseTotalNs = 9; uint32 Uptime = 10;
-}
-service StatsService {
-  rpc GetStats (GetStatsRequest) returns (GetStatsResponse);
-  rpc QueryStats (QueryStatsRequest) returns (QueryStatsResponse);
-  rpc GetSysStats (SysStatsRequest) returns (SysStatsResponse);
-}
-EOF_V2E
-
   cat > "$V2RAY_PROTO_V2RAY" <<'EOF_V2V'
 syntax = "proto3";
 package v2ray.core.app.stats.command;
@@ -3361,24 +3354,75 @@ ensure_v2ray_api_on_json() {
 
 # ---------- 流量查询 ----------
 
+v2ray_api_query() {
+  local method="$1" payload="$2"
+  [ -x "$GRPCURL_BIN" ] || { warn "缺少 grpcurl，统计不可用。"; return 1; }
+  [ -s "$V2RAY_PROTO_V2RAY" ] || ensure_v2ray_api_proto_files || return 1
+  "$GRPCURL_BIN" -plaintext -connect-timeout 2 -max-time 3 \
+    -import-path "$(dirname "$V2RAY_PROTO_V2RAY")" -proto "$(basename "$V2RAY_PROTO_V2RAY")" \
+    -d "$payload" "$V2RAY_API_LISTEN" "v2ray.core.app.stats.command.StatsService/$method"
+}
+
 query_v2ray_api_stats_json() {
-  ensure_grpcurl >/dev/null 2>&1 || return 1
-  ensure_v2ray_api_proto_files
-  local payload out stats
-  payload='{"patterns":["user>>>"],"reset":false,"regexp":false}'
-  out="$("$GRPCURL_BIN" -plaintext -import-path /etc/sing-box -proto v2rayapi-v2ray.proto -d "$payload" "$V2RAY_API_LISTEN" v2ray.core.app.stats.command.StatsService/QueryStats 2>/dev/null)" || true
-  if [ -n "$out" ]; then
-    stats="$(echo "$out" | jq -ce 'if .stat != null then .stat else null end' 2>/dev/null)" && {
-      echo "$stats"; return 0
-    }
-  fi
-  out="$("$GRPCURL_BIN" -plaintext -import-path /etc/sing-box -proto v2rayapi-experimental.proto -d "$payload" "$V2RAY_API_LISTEN" experimental.v2rayapi.StatsService/QueryStats 2>/dev/null)" || true
-  if [ -n "$out" ]; then
-    stats="$(echo "$out" | jq -ce 'if .stat != null then .stat else null end' 2>/dev/null)" && {
-      echo "$stats"; return 0
-    }
-  fi
-  return 1
+  local out
+  out="$(v2ray_api_query QueryStats '{"patterns":["user>>>"],"reset":false,"regexp":false}')" || return 1
+  printf '%s' "$out" | jq -ce '(.stat // []) | select(type == "array")'
+}
+
+query_v2ray_api_uptime() {
+  local out
+  out="$(v2ray_api_query GetSysStats '{}')" || return 1
+  printf '%s' "$out" | jq -er '(.Uptime // .uptime // 0) | tonumber | select(. >= 0)'
+}
+
+query_usage_snapshot() {
+  local before after first last stats monotonic
+  before="$(singbox_process_token)" || return 1
+  first="$(query_v2ray_api_uptime)" || return 1
+  stats="$(query_v2ray_api_stats_json)" || return 1
+  last="$(query_v2ray_api_uptime)" || return 1
+  monotonic="$(awk '{print int($1)}' /proc/uptime)" || return 1
+  after="$(singbox_process_token)" || return 1
+  [ "$before" = "$after" ] && [ "$last" -ge "$first" ] || return 1
+  jq -nc --arg process "$after" --argjson start "$((monotonic - last))" --argjson stats "$stats" \
+    '{process:$process, start:$start, stats:$stats}'
+}
+
+# 纯变换：按完整 auth_user 保存基线，再聚合业务用户。start 用单调时钟，避免 NTP 校时误判。
+account_usage_snapshot() {
+  local db="$1" snapshot="$2"
+  printf '%s' "$db" | jq --argjson snap "$snapshot" '
+    def business($name): if ($name|contains("@")) then ($name|split("@")[1]) else "admin" end;
+    def delta($now; $old): if $now >= $old then $now-$old else $now end;
+    . as $db
+    | (.meta.usage // {}) as $prev
+    | (($prev.process // "") != $snap.process or (($prev.start // 0) - $snap.start | fabs) > 2) as $new_epoch
+    | (reduce ($snap.stats[]? | select((.name // "")|test("^user>>>.+>>>traffic>>>(uplink|downlink)$"))) as $s
+        ({}; ($s.name|capture("^user>>>(?<user>.+)>>>traffic>>>(?<dir>uplink|downlink)$")) as $m
+          | .[$m.user][$m.dir] = ($s.value|tonumber))) as $live
+    | (reduce ($live|to_entries[]) as $item ({};
+        business($item.key) as $u
+        | ($item.value.uplink // 0) as $up | ($item.value.downlink // 0) as $down
+        | (if $new_epoch then {} else ($prev.counters[$item.key] // {}) end) as $old
+        | .[$u].up = ((.[$u].up // 0) + delta($up; ($old.uplink // 0)))
+        | .[$u].down = ((.[$u].down // 0) + delta($down; ($old.downlink // 0)))
+        | .[$u].live_up = ((.[$u].live_up // 0) + $up)
+        | .[$u].live_down = ((.[$u].live_down // 0) + $down))) as $usage
+    | .users |= with_entries(
+        .key as $u | .value as $v | ($usage[$u] // {}) as $n
+        # 首次从旧版迁移：沿用旧聚合基线结算一次，然后保存节点基线。
+        | .value.used_up_bytes = (($v.used_up_bytes // 0) +
+            (if $prev.process == null then delta(($n.live_up // 0); ($v.last_live_up_bytes // 0)) else ($n.up // 0) end))
+        | .value.used_down_bytes = (($v.used_down_bytes // 0) +
+            (if $prev.process == null then delta(($n.live_down // 0); ($v.last_live_down_bytes // 0)) else ($n.down // 0) end))
+        | .value.last_live_up_bytes = ($n.live_up // 0)
+        | .value.last_live_down_bytes = ($n.live_down // 0))
+    | .meta.usage = {
+        process:$snap.process,
+        start:(if $new_epoch then $snap.start else $prev.start end),
+        counters:((if $new_epoch then {} else ($prev.counters // {}) end) * $live)
+      }
+  '
 }
 
 build_live_usage_object() {
@@ -3407,31 +3451,13 @@ sync_user_usage_counters() {
 
 _sync_user_usage_counters_body() {
   user_db_exists || return 0
-  [ -x "$GRPCURL_BIN" ] || return 0
   singbox_service_active || return 0
-
-  local stats_json usage_json db_json
-  stats_json="$(query_v2ray_api_stats_json)" || return 0
-  echo "$stats_json" | jq -e 'type=="array"' >/dev/null 2>&1 || return 0
-  usage_json="$(build_live_usage_object "$stats_json")" || return 0
-  db_json="$(user_db_load)"
-  db_json="$(echo "$db_json" | jq --argjson usage "$usage_json" '
-    .users |= with_entries(
-      .value as $v
-      | ($usage[.key].up // 0) as $live_up
-      | ($usage[.key].down // 0) as $live_down
-      | ($v.last_live_up_bytes // 0) as $last_up
-      | ($v.last_live_down_bytes // 0) as $last_down
-      | .value.used_up_bytes = (($v.used_up_bytes // 0) + (if $live_up >= $last_up then ($live_up - $last_up) else $live_up end))
-      | .value.used_down_bytes = (($v.used_down_bytes // 0) + (if $live_down >= $last_down then ($live_down - $last_down) else $live_down end))
-      | .value.last_live_up_bytes = $live_up
-      | .value.last_live_down_bytes = $live_down
-    )
-  ')" || return 0
-  user_db_save "$db_json" || {
-    warn "用户流量统计落盘失败：$USER_DB_FILE"
-    return 1
-  }
+  # 尚未启用统计的首次安装，不读取不存在的 API。
+  jq -e '.experimental.v2ray_api.stats.enabled == true' "$CONFIG_FILE" >/dev/null 2>&1 || return 0
+  local snapshot db_json
+  snapshot="$(query_usage_snapshot)" || { warn "统计采样失败，本次未修改流量基线。"; return 1; }
+  db_json="$(account_usage_snapshot "$(user_db_load)" "$snapshot")" || return 1
+  user_db_save "$db_json" || { warn "用户流量统计落盘失败：$USER_DB_FILE"; return 1; }
 }
 
 # ---------- Meta 存储（Reality 公钥等） ----------
@@ -3531,6 +3557,10 @@ user_db_save() {
 }
 
 user_db_touch_data_updated_at() {
+  with_manager_lock _user_db_touch_data_updated_at_body "$@"
+}
+
+_user_db_touch_data_updated_at_body() {
   user_db_exists || return 0
   local db_json now_text
   db_json="$(user_db_load)"
@@ -3632,6 +3662,10 @@ user_db_cleanup_missing_nodes() {
 }
 
 user_db_cleanup_current_and_save() {
+  with_manager_lock _user_db_cleanup_current_and_save_body "$@"
+}
+
+_user_db_cleanup_current_and_save_body() {
   local db_json json cleaned
   user_db_exists || return 0
   db_json="$(user_db_load)"
@@ -3651,25 +3685,6 @@ user_db_cleanup_current_and_save() {
 #       50_v2ray_api.sh, 60_user_db.sh
 # ============================================================
 
-migrate_socks_user_object_for_desired() {
-  local inbound="$1" desired="$2" entry_key="$3"
-  [ "$(user_node_part "$desired")" = "$entry_key" ] || return 1
-  local business_user
-  business_user="$(user_business_name "$desired")"
-  echo "$inbound" | jq -c --arg desired "$desired" --arg biz "$business_user" '
-    def node_part($u): if ($u | contains("@")) then ($u | split("@")[0]) else $u end;
-    def business($u): if ($u | contains("@")) then ($u | split("@")[1]) else "admin" end;
-    [
-      (.users // [])[]?
-      | (.username // "") as $u
-      | select($u != "")
-      | select(((node_part($u) | contains("-to-")) | not))
-      | select(business($u) == $biz)
-      | .username = $desired
-    ][0] // empty
-  '
-}
-
 user_manager_apply_to_json() {
   local json="$1" db_json="$2" meta_json="${3:-}"
   local work_json="$json"
@@ -3681,70 +3696,39 @@ user_manager_apply_to_json() {
     inbound="$(find_inbound_by_entry_key "$work_json" "$entry_key")"
     [ -n "$inbound" ] || continue
 
-    local relay_nodes=() relay_node
-    mapfile -t relay_nodes < <(echo "$inbound" | jq -r '.users[]? | (.name // .username // empty)' | while IFS= read -r n; do
-      [ -n "$n" ] || continue
-      np="$(user_node_part "$n")"
-      if [[ "$np" == *"-to-"* && "$np" != "$entry_key" ]]; then
-        echo "$np"
-      fi
-    done | sort -u)
-
-    local credential_base_name="$entry_key"
-
-    local desired_names=()
-    if [ "$proto" != "socks" ] || user_db_user_is_enabled "$db_json" "admin"; then
-      desired_names+=("$credential_base_name")
-    fi
-    local username
-    while IFS= read -r username; do
-      [ -n "$username" ] || continue
-      [ "$username" = "admin" ] && continue
-      if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
-        continue
-      fi
-      if user_db_user_allow_node "$db_json" "$username" "$entry_key"; then
-        desired_names+=("$(node_user_name "$credential_base_name" "$username")")
-      fi
-    done < <(user_db_all_users "$db_json")
-
-    for relay_node in "${relay_nodes[@]}"; do
-      desired_names+=("$relay_node")
-      while IFS= read -r username; do
-        [ -n "$username" ] || continue
-        [ "$username" = "admin" ] && continue
-        if [ "$proto" = "socks" ] && ! user_db_user_is_enabled "$db_json" "$username"; then
-          continue
-        fi
-        if user_db_user_allow_node "$db_json" "$username" "$relay_node"; then
-          desired_names+=("$(node_user_name "$relay_node" "$username")")
-        fi
-      done < <(user_db_all_users "$db_json")
-    done
-
-    local users_tmp
-    users_tmp="$(mktemp)"
-    local desired full_name existing_obj new_obj
-    for desired in "${desired_names[@]}"; do
-      existing_obj="$(find_user_obj_in_inbound "$inbound" "$desired")"
-      if [ -z "$existing_obj" ] && [ "$proto" = "socks" ]; then
-        existing_obj="$(migrate_socks_user_object_for_desired "$inbound" "$desired" "$entry_key" || true)"
-      fi
-      if [ -n "$existing_obj" ]; then
-        echo "$existing_obj" >> "$users_tmp"
-      else
-        new_obj="$(build_user_object_from_inbound "$inbound" "$desired")" || {
-          rm -f "$users_tmp"
-          return 1
-        }
-        echo "$new_obj" >> "$users_tmp"
-      fi
-    done
-    local users_json='[]'
-    if [ -s "$users_tmp" ]; then
-      users_json="$(jq -s '.' "$users_tmp")"
-    fi
-    rm -f "$users_tmp" >/dev/null 2>&1 || true
+    # Plan credentials in one jq pass; only new credentials need external generators.
+    local plan users_json missing desired new_obj
+    plan="$(echo "$inbound" | jq -c --argjson db "$db_json" --arg entry "$entry_key" --arg proto "$proto" "${JQ_NODE_PART}"'
+      def business($n): if ($n|contains("@")) then ($n|split("@")[1]) else "admin" end;
+      . as $ib
+      | [(.users // [])[] | (.name // .username // "") | node_part(.)
+         | select(contains("-to-") and . != $entry)] | unique as $relays
+      | def allowed($node):
+          $db.users | to_entries[] | select(.key != "admin")
+          | select($proto != "socks" or .value.enabled == true)
+          | select(.value.allow_all_nodes == true or ((.value.nodes // []) | index($node)) != null)
+          | $node + "@" + .key;
+      [if $proto != "socks" or $db.users.admin.enabled == true then $entry else empty end,
+       allowed($entry), ($relays[] | . as $node | $node, allowed($node))] as $desired
+      | (reduce ($ib.users // [])[] as $u ({}; .[$u.name // $u.username] //= $u)) as $existing
+      | [$desired[] | . as $name
+          | ($existing[$name] // (if $proto == "socks" and node_part($name) == $entry then
+              [$ib.users[]? | select((.username // "") != "")
+               | select((node_part(.username)|contains("-to-")|not) and business(.username) == business($name))
+               | .username=$name][0] else null end)) as $object
+          | {name:$name,object:$object}]
+    ')" || return 1
+    users_json="$(echo "$plan" | jq -c '[.[].object | select(. != null)]')" || return 1
+    while IFS= read -r desired; do
+      [ -n "$desired" ] || continue
+      new_obj="$(build_user_object_from_inbound "$inbound" "$desired")" || return 1
+      users_json="$(echo "$users_json" | jq -c --argjson obj "$new_obj" '. + [$obj]')" || return 1
+    done < <(echo "$plan" | jq -r '.[] | select(.object == null) | .name')
+    # Match the original desired order, including credentials just created.
+    users_json="$(echo "$users_json" | jq -c --argjson plan "$plan" '
+      (reduce .[] as $u ({}; .[$u.name // $u.username]=$u)) as $by_name
+      | [$plan[].name | $by_name[.]]
+    ')" || return 1
     work_json="$(echo "$work_json" | jq --argjson idx "$idx" --argjson users "$users_json" '.inbounds[$idx].users = $users')" || return 1
   done
 
@@ -3780,12 +3764,65 @@ filter_disabled_auth_users() {
   ' --argjson enabled "$enabled_json"
 }
 
+# 菜单传入前后快照用于提取字段补丁；在锁内将补丁合并到最新数据。
+# 同字段被其他管理操作修改时拒绝提交，避免无声覆盖。
+merge_user_edit() {
+  local current="$1" before="$2" after="$3" mode="${4:-edit}" target="${5:-}"
+  printf '%s' "$current" | jq --argjson before "$before" --argjson after "$after" --arg mode "$mode" --arg target "$target" '
+    def policy: del(.used_up_bytes,.used_down_bytes,.last_live_up_bytes,.last_live_down_bytes,.manual_added_bytes);
+    reduce ((($before.users|keys) + ($after.users|keys)) | unique[]) as $u (. ;
+      ($before.users[$u]) as $old | ($after.users[$u]) as $new
+      | if $old == null then
+          if .users[$u] != null then error("用户已被其他操作创建: " + $u) else .users[$u]=$new end
+        elif $new == null then
+          if .users[$u] == null then .
+          elif ((.users[$u]|policy) != ($old|policy)) then error("用户状态已变化，请重新确认删除: " + $u)
+          else del(.users[$u]) end
+        else
+          ([$new|keys[] | select(. != "used_up_bytes" and . != "used_down_bytes" and . != "last_live_up_bytes" and . != "last_live_down_bytes")
+            | . as $f | select($new[$f] != $old[$f])]) as $fields
+          | if ($fields|length) == 0 and ($u != $target or $mode != "reset") then .
+            elif .users[$u] == null then error("用户已被删除: " + $u)
+            else reduce $fields[] as $f (. ;
+              if $f == "manual_added_bytes" and $mode == "add" then
+                .users[$u][$f] = ((.users[$u][$f] // 0) + ($new[$f] // 0) - ($old[$f] // 0))
+              elif $f == "manual_added_bytes" and $mode == "reset" then .
+              elif .users[$u][$f] != $old[$f] then error("字段已被其他操作修改: " + $u + "." + $f)
+              else .users[$u][$f]=$new[$f] end)
+            end
+        end)
+    | if $mode == "reset" then
+        if .users[$target] == null then error("用户不存在") else
+          .users[$target].used_up_bytes=0 | .users[$target].used_down_bytes=0 | .users[$target].manual_added_bytes=0
+        end
+      else . end
+  '
+}
+
+user_manager_commit_edit() {
+  with_manager_lock _user_manager_commit_edit_body "$@"
+}
+
+_user_manager_commit_edit_body() {
+  local before="$1" after="$2" mode="${3:-edit}" target="${4:-}" merged
+  sync_user_usage_counters || return 1
+  merged="$(merge_user_edit "$(user_db_load)" "$before" "$after" "$mode" "$target")" || {
+    err "数据已变化或输入无效，请重新打开菜单后操作。"
+    return 1
+  }
+  _user_manager_apply_changes_body "$merged"
+}
+
 user_manager_apply_changes() {
   with_manager_lock _user_manager_apply_changes_body "$@"
 }
 
 _user_manager_apply_changes_body() {
   local db_json="$1" base_json="${2:-}" meta_json="${3:-}"
+  if [ "${_USER_KEEP_LATEST_DB:-0}" = "1" ]; then
+    sync_user_usage_counters || return 1
+    db_json="$(user_db_load)"
+  fi
   [ -n "$base_json" ] || base_json="$(config_load)"
 
   db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
@@ -3877,9 +3914,13 @@ user_current_period() {
 }
 
 user_manager_reconcile_user_state() {
+  with_manager_lock _user_manager_reconcile_user_state_body
+}
+
+_user_manager_reconcile_user_state_body() {
   init_manager_env || return 1
   user_db_exists || return 0
-  sync_user_usage_counters || true
+  sync_user_usage_counters || return 1
 
   local db_json json today period today_day last_day result changed
   db_json="$(user_db_load)"
@@ -3910,6 +3951,14 @@ user_manager_reconcile_user_state() {
           else 0 end
         ) as $effective_reset_day
 
+      | ($period | split("-") | map(tonumber)) as $ym
+      | (if $ym[1] == 1 then [($ym[0]-1),12] else [$ym[0],($ym[1]-1)] end) as $prev
+      | (if $today_day >= $effective_reset_day then $period
+         else (($prev[0]|tostring) + "-" + ("0" + ($prev[1]|tostring))[-2:]) end) as $due_period
+      # 新建用户/调整重置日先建账，不追溯清零；已有账期则补做漏掉的重置。
+      | if ($effective_reset_day > 0 and $last_reset == "") then
+          .value.last_reset_period = $due_period
+        else . end
       # 1. 到期检查：expire_at 为到期停用日，当天即禁用
       | if $expired then
           .value.enabled = false
@@ -3920,11 +3969,11 @@ user_manager_reconcile_user_state() {
             end
         end
       # 2. 重置检查
-      | if (($expired | not) and $effective_reset_day > 0 and $today_day == $effective_reset_day and $last_reset != $period) then
+      | if (($expired | not) and $effective_reset_day > 0 and $last_reset != "" and $last_reset < $due_period) then
           .value.used_up_bytes = 0
           | .value.used_down_bytes = 0
           | .value.manual_added_bytes = 0
-          | .value.last_reset_period = $period
+          | .value.last_reset_period = $due_period
           | if ((.value.disabled_reason // null) == "quota_exceeded") then
               .value.enabled = true
               | .value.disabled_reason = null
@@ -3959,11 +4008,8 @@ user_watch_run() {
   user_db_exists || return 0
   mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
   if ! has_cmd flock || ! { exec {lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
-    if user_manager_background_sync >/dev/null 2>&1; then
-      apply_automatic_user_controls >/dev/null 2>&1 || true
-      user_db_touch_data_updated_at >/dev/null 2>&1 || true
-    fi
-    return 0
+    err "无法获取管理锁，本轮后台同步已跳过。"
+    return 1
   fi
   flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
@@ -4165,8 +4211,9 @@ show_user_allowed_nodes() {
 }
 
 user_add_menu() {
-  local db_json json username quota reset_day expire_at ans nodes_json allow_all_json
+  local db_json json username quota reset_day expire_at ans nodes_json allow_all_json before_db
   db_json="$(user_db_load)"
+  before_db="$db_json"
   json="$(config_load)"
   clear
   print_rect_title "新增用户"
@@ -4216,7 +4263,7 @@ user_add_menu() {
       nodes: $nodes
     }
   ')"
-  user_manager_apply_changes "$db_json" "$json" || { pause; return 1; }
+  user_manager_commit_edit "$before_db" "$db_json" || { pause; return 1; }
   pause
 }
 
@@ -4224,9 +4271,6 @@ user_manage_permission_menu() {
   local db_json="$1" username="$2" json="$3"
   local cleaned_db_json
   cleaned_db_json="$(user_db_cleanup_missing_nodes "$db_json" "$json")" || cleaned_db_json="$db_json"
-  if [ "$(echo "$cleaned_db_json" | jq -c . 2>/dev/null)" != "$(echo "$db_json" | jq -c . 2>/dev/null)" ]; then
-    user_db_save "$cleaned_db_json" || return 1
-  fi
   db_json="$cleaned_db_json"
   local current_nodes_json
   local nodes=() node i raw picks=() invalid=0 sel idx selected_json new_db
@@ -4383,8 +4427,6 @@ user_add_usage_menu() {
 
 user_reset_usage_menu() {
   local db_json="$1" username="$2"
-  sync_user_usage_counters || true
-  db_json="$(user_db_load)"
   clear >&2
   print_rect_title "手动重置流量" >&2
   show_user_status_table "$db_json" >&2
@@ -4435,8 +4477,6 @@ user_renew_menu() {
   local db_json="$1" username="$2"
   local current_expire today base_date expired=0 choice months custom_months new_expire
 
-  sync_user_usage_counters || true
-  db_json="$(user_db_load)"
   clear >&2
   print_rect_title "一键续期" >&2
   show_user_status_table "$db_json" >&2
@@ -4515,9 +4555,10 @@ user_renew_menu() {
 
 user_manage_single() {
   local username="$1"
-  local db_json json act new_db is_admin=0
+  local db_json json act new_db mode is_admin=0
   [ "$username" = "admin" ] && is_admin=1
   while true; do
+    sync_user_usage_counters || return 1
     db_json="$(user_db_load)"
     json="$(config_load)"
     clear
@@ -4541,7 +4582,7 @@ user_manage_single() {
         else
           new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')"
         fi
-        user_manager_apply_changes "$new_db" "$json" || true
+        user_manager_commit_edit "$db_json" "$new_db" edit "$username" || true
         ;;
       2)
         if [ $is_admin -eq 1 ]; then
@@ -4549,32 +4590,34 @@ user_manage_single() {
         else
           new_db="$(user_manage_permission_menu "$db_json" "$username" "$json")" || new_db=""
           if json_is_object "$new_db"; then
-            user_manager_apply_changes "$new_db" "$json" || true
+            user_manager_commit_edit "$db_json" "$new_db" edit "$username" || true
           fi
         fi
         ;;
       3)
         new_db="$(user_manage_package_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+          user_manager_commit_edit "$db_json" "$new_db" edit "$username" || true
         fi
         ;;
       4)
         new_db="$(user_reset_usage_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+          user_manager_commit_edit "$db_json" "$new_db" reset "$username" || true
         fi
         ;;
       5)
         new_db="$(user_add_usage_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+          user_manager_commit_edit "$db_json" "$new_db" add "$username" || true
         fi
         ;;
       6)
+        mode=edit
+        if user_expire_is_past "$(user_today_date)" "$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"; then mode=reset; fi
         new_db="$(user_renew_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
-          user_manager_apply_changes "$new_db" "$json" || true
+          user_manager_commit_edit "$db_json" "$new_db" "$mode" "$username" || true
         fi
         ;;
       0|q|Q|"") return 0 ;;
@@ -4649,7 +4692,7 @@ user_delete_menu() {
   for username in "${names_to_delete[@]}"; do
     new_db="$(echo "$new_db" | jq --arg u "$username" 'del(.users[$u])')" || return 1
   done
-  user_manager_apply_changes "$new_db" "$json" || true
+  user_manager_commit_edit "$db_json" "$new_db" || true
   pause
 }
 
@@ -6592,12 +6635,16 @@ tg_task_exec_set_reset_day() {
 }
 
 tg_execute_task() {
+  with_manager_lock _tg_execute_task_body "$@"
+}
+
+_tg_execute_task_body() {
   local task="$1" action username db_json exists params result
   action="$(echo "$task" | jq -r '.action // empty')"
   username="$(echo "$task" | jq -r '.username // empty')"
   [ -n "$action" ] && [ -n "$username" ] || { echo "任务参数不完整。"; return 1; }
   user_db_exists || { echo "用户数据库不存在。"; return 1; }
-  sync_user_usage_counters || true
+  sync_user_usage_counters || return 1
   db_json="$(user_db_load)"
   exists="$(echo "$db_json" | jq -r --arg u "$username" 'if .users[$u] then "1" else "0" end')"
   [ "$exists" = "1" ] || { echo "用户不存在：$username"; return 1; }
@@ -7470,7 +7517,7 @@ warp_config_project_json() {
             )
         )
         + (if $ready then
-            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, download_detour:"direct"}))
+            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, http_client:{version:2,detour:"direct"}}))
           else [] end)
       )
     | .outbounds = (
@@ -7937,7 +7984,7 @@ export_configs() {
           ;;
         shadowsocks)
           [ -z "$pass" ] && continue
-          if [ -n "$server_p" ] && [ "$server_p" != "$pass" ]; then pw_out="${server_p}:${pass}"; else pw_out="$pass"; fi
+          if [ -n "$server_p" ]; then pw_out="${server_p}:${pass}"; else pw_out="$pass"; fi
           {
             echo -e "\n${W}[${out_name}]${NC}"
             echo -e " Clash: - {name: \"${out_name}\", type: ss, server: $ip, port: ${port}, cipher: ${method}, password: \"${pw_out}\", udp: true}"
@@ -7968,7 +8015,7 @@ export_configs() {
           [ -z "$uuid" ] && continue
           {
             echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: ${out_name}, type: vmess, server: $ip, port: 443, uuid: ${uuid}, alterId: 0, cipher: auto, udp: true, tls: true, network: ws, servername: ${vm_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${vm_domain}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}}"
+            echo -e " Clash: - {name: ${out_name}, type: vmess, server: $ip, port: 443, uuid: ${uuid}, alterId: 0, cipher: auto, udp: true, tls: true, network: ws, servername: ${vm_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${vm_domain}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}"
             echo ""
             echo -e " Quantumult X: vmess=$ip:443, method=chacha20-poly1305, password=${uuid}, obfs=wss, obfs-host=${vm_domain}, obfs-uri=${path}?ed=2048, fast-open=false, udp-relay=true, tag=${out_name}"
             echo ""
@@ -7982,7 +8029,7 @@ export_configs() {
           [ -z "$uuid" ] && continue
           {
             echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: 443, uuid: ${uuid}, udp: true, tls: true, network: ws, servername: ${ws_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${ws_domain}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}}"
+            echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: 443, uuid: ${uuid}, udp: true, tls: true, network: ws, servername: ${ws_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${ws_domain}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}"
             echo ""
             echo -e " Quantumult X: vless=$ip:443,method=none,password=${uuid},obfs=wss,obfs-host=${ws_domain},obfs-uri=${path}?ed=2048,fast-open=false,udp-relay=true,tag=${out_name}"
             echo ""
@@ -8067,8 +8114,8 @@ ensure_deps_for_installer() {
   install_pkg openssl
   install_pkg tar
   case "$PKG_MANAGER" in
-    apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip ;;
-    apk) install_pkg ca-certificates; install_pkg gcompat ;;
+    apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip; install_pkg util-linux ;;
+    apk) install_pkg ca-certificates; install_pkg gcompat; install_pkg flock ;;
   esac
 }
 
@@ -8529,11 +8576,12 @@ singbox_command_exists() {
 }
 
 prepare_script_runtime() {
-  migrate_legacy_script_name
-  write_managed_singbox_service
-  ensure_command_compat_links
-  mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
-  [ "$INIT_SYSTEM" = "systemd" ] && systemctl daemon-reload >/dev/null 2>&1 || true
+  migrate_legacy_script_name || return 1
+  write_managed_singbox_service || return 1
+  ensure_command_compat_links || return 1
+  mkdir -p /var/log/sing-box || return 1
+  if [ "$INIT_SYSTEM" = "systemd" ]; then systemctl daemon-reload || return 1; fi
+  return 0
 }
 
 # ---------- 安装/更新 sing-box ----------
@@ -8549,8 +8597,6 @@ install_or_update_singbox() {
   case "$arch" in
     x86_64) file="sing-box-linux-amd64.tar.gz" ;;
     aarch64|arm64) file="sing-box-linux-arm64.tar.gz" ;;
-    armv7l|armv7) file="sing-box-linux-armv7.tar.gz" ;;
-    i386|i686) file="sing-box-linux-386.tar.gz" ;;
     *)
       err "不支持的架构：$arch"
       pause
@@ -8586,6 +8632,7 @@ install_or_update_singbox() {
     echo -e "最新版本：${G}${latest_ver}${NC}"
     if [ -n "${inst:-}" ] && version_ge "$inst" "$latest_ver"; then
       if is_install_complete; then
+        config_apply "$(config_load)" || { pause; return 1; }
         ok "当前已是最新版本。"
         pause
         return 0
@@ -8610,7 +8657,7 @@ install_or_update_singbox() {
   fi
 
   if [ "${managed_env}" = "1" ] && [ -x "$SINGBOX_BIN" ]; then
-    sync_user_usage_counters || true
+    sync_user_usage_counters || { pause; return 1; }
   fi
 
   tmp_dir="$(make_disk_tmp_dir sb-install)" || {
@@ -8675,58 +8722,19 @@ install_or_update_singbox() {
     return 1
   fi
 
-  # 事务边界开始：备份旧 binary → 原子替换。若 service 起不来则回滚 binary。
-  mkdir -p "$SINGBOX_INSTALL_DIR" /etc/sing-box
-  local _binary_backed_up=0
-  if [ -x "$SINGBOX_BIN" ]; then
-    if cp -a "$SINGBOX_BIN" "${SINGBOX_BIN}.bak"; then
-      _binary_backed_up=1
-    else
-      rm -rf "$tmp_dir"
-      err "无法备份旧 sing-box 二进制：${SINGBOX_BIN} → ${SINGBOX_BIN}.bak"
-      pause
-      return 1
-    fi
-  fi
-  if ! install -m 755 "$tmp_dir/sing-box" "$SINGBOX_BIN"; then
+  if ! ensure_grpcurl_logged || ! ensure_v2ray_api_proto_files; then
     rm -rf "$tmp_dir"
-    err "二进制写入失败：$SINGBOX_BIN"
-    if [ "$_binary_backed_up" = "1" ]; then
-      mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN" 2>/dev/null || true
-    fi
+    err "统计组件未就绪，已取消升级。"
+    pause
+    return 1
+  fi
+  if ! with_manager_lock install_candidate_singbox "$tmp_dir/sing-box" "$tag"; then
+    rm -rf "$tmp_dir"
     pause
     return 1
   fi
   rm -rf "$tmp_dir"
-
-  ensure_grpcurl_logged || true
-  ensure_v2ray_api_proto_files || true
-
-  prepare_script_runtime
-  config_ensure_exists
-  config_force_access_log_settings || true
-  if ! _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
-    # 事务边界：service 启动失败必须回滚旧 binary，保证用户不被卡在"装了新版但起不来"状态
-    if [ "$_binary_backed_up" = "1" ]; then
-      err "sing-box 服务启动失败，正在回滚到旧二进制..."
-      if mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN"; then
-        if _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
-          warn "已回滚到旧 sing-box，新版本未安装成功。请检查日志后再次执行 1. 安装/更新。"
-        else
-          err "回滚后服务仍无法启动，请检查 $SINGBOX_BIN 与日志。"
-        fi
-      else
-        err "二进制回滚失败：${SINGBOX_BIN}.bak → ${SINGBOX_BIN}。请手动恢复。"
-      fi
-    else
-      err "sing-box 服务启动失败（首次安装，无旧版本可回滚）。"
-      rm -f "$SINGBOX_BIN" >/dev/null 2>&1 || true
-    fi
-    pause
-    return 1
-  fi
-  _binary_backed_up=0
-  # 事务边界结束：service 已起来，后续步骤失败仅 warn，不回滚 binary 也不阻塞 stamp 写入
+  # 内核事务已提交；可重试的菜单/cron 初始化不影响已验证的内核。
   ensure_sb_shortcut || true
   ensure_user_manager_ready || warn "用户数据库初始化失败，用户管理菜单进入时会重试初始化。"
   install_periodic_sync_cron || warn "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
@@ -8740,15 +8748,87 @@ install_or_update_singbox() {
   user_manager_background_sync || warn "用户管理后台同步初始化失败。下次 periodic-sync cron 会重试。"
   tg_refresh_after_singbox_install || true
 
-  # 走到这里说明 service 已经起来（事务化保证）；后续步骤即使失败也只 warn，不影响 stamp
-  echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
-    err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
-    pause
-    return 1
-  }
-  rm -f "${SINGBOX_BIN}.bak" >/dev/null 2>&1 || true
   ok "安装完成。"
   pause
+}
+
+# 调用方持管理锁。候选文件在正式路径之外完成校验；保留最近一次成功版本。
+install_candidate_singbox() {
+  local candidate="$1" tag="$2" next_config old_config next_bin old_bin stamp_tmp had_config=0 had_bin=0
+  mkdir -p "$SINGBOX_INSTALL_DIR" "$(dirname "$CONFIG_FILE")" || return 1
+  if [ -e "$CONFIG_FILE" ]; then
+    jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null || { err "现有配置无效，已取消升级。"; return 1; }
+    had_config=1
+  fi
+  next_config="$(mktemp "${CONFIG_FILE}.upgrade.XXXXXX")" || return 1
+  if [ "$had_config" = 1 ]; then
+    config_normalize "$(cat "$CONFIG_FILE")" > "$next_config" || { rm -f "$next_config"; return 1; }
+  else
+    config_normalize "$(config_min_template)" > "$next_config" || { rm -f "$next_config"; return 1; }
+  fi
+  if ! "$candidate" check -c "$next_config"; then
+    rm -f "$next_config"
+    err "新内核不接受当前配置，正式文件未替换。"
+    return 1
+  fi
+  sync_user_usage_counters || { rm -f "$next_config"; return 1; }
+  old_config="$(mktemp "${CONFIG_FILE}.rollback.XXXXXX")" || { rm -f "$next_config"; return 1; }
+  if [ "$had_config" = 1 ]; then
+    cp -p "$CONFIG_FILE" "$old_config" || { rm -f "$old_config" "$next_config"; return 1; }
+  fi
+  next_bin="$(mktemp "${SINGBOX_BIN}.new.XXXXXX")" || { rm -f "$old_config" "$next_config"; return 1; }
+  old_bin="$(mktemp "${SINGBOX_BIN}.rollback.XXXXXX")" || { rm -f "$next_bin" "$old_config" "$next_config"; return 1; }
+  if [ -x "$SINGBOX_BIN" ]; then
+    had_bin=1
+    cp -p "$SINGBOX_BIN" "$old_bin" || { rm -f "$old_bin" "$next_bin" "$old_config" "$next_config"; return 1; }
+  fi
+  if ! install -m 755 "$candidate" "$next_bin"; then
+    rm -f "$old_bin" "$next_bin" "$old_config" "$next_config"
+    return 1
+  fi
+  stamp_tmp="$(mktemp "${SINGBOX_VERSION_STAMP}.tmp.XXXXXX")" || {
+    rm -f "$old_bin" "$next_bin" "$old_config" "$next_config"; return 1;
+  }
+  if ! printf '%s\n' "$tag" > "$stamp_tmp"; then
+    rm -f "$stamp_tmp" "$old_bin" "$next_bin" "$old_config" "$next_config"; return 1
+  fi
+  if mv -f "$next_bin" "$SINGBOX_BIN" && mv -f "$next_config" "$CONFIG_FILE" &&
+      prepare_script_runtime && _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe &&
+      mv -f "$stamp_tmp" "$SINGBOX_VERSION_STAMP"; then
+    if [ "$had_bin" = 1 ]; then
+      mv -f "$old_bin" "${SINGBOX_BIN}.bak" || warn "旧内核保留于 $old_bin"
+    else
+      rm -f "$old_bin"
+    fi
+    if [ "$had_config" = 1 ]; then
+      mv -f "$old_config" "${CONFIG_FILE}.bak.upgrade" || warn "旧配置保留于 $old_config"
+    else
+      rm -f "$old_config"
+    fi
+    case "$INIT_SYSTEM" in
+      systemd) systemctl enable sing-box >/dev/null 2>&1 || warn "设置自启失败。" ;;
+      openrc) openrc_enable_service sing-box default >/dev/null 2>&1 || warn "设置自启失败。" ;;
+    esac
+    return 0
+  fi
+  err "升级未通过运行检查，正在恢复旧内核及配置。"
+  rm -f "$next_bin" "$next_config" "$stamp_tmp"
+  if [ "$had_config" = 1 ]; then
+    mv -f "$old_config" "$CONFIG_FILE" || { err "配置回滚失败，备份：$old_config"; return 1; }
+  else
+    rm -f "$CONFIG_FILE" "$old_config"
+  fi
+  if [ "$had_bin" = 1 ]; then
+    mv -f "$old_bin" "$SINGBOX_BIN" || { err "内核回滚失败，备份：$old_bin"; return 1; }
+    _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe || err "旧内核恢复后启动失败，请检查服务日志。"
+  else
+    case "$INIT_SYSTEM" in
+      systemd) systemctl stop sing-box >/dev/null 2>&1 || true ;;
+      openrc) rc-service sing-box stop >/dev/null 2>&1 || true ;;
+    esac
+    rm -f "$SINGBOX_BIN" "$old_bin"
+  fi
+  return 1
 }
 
 # ---------- 时间同步 ----------
@@ -9527,7 +9607,7 @@ protocol_install_menu() {
     for node_key in "${added_node_keys[@]}"; do
       db_json="$(user_db_on_node_added "$db_json" "$node_key")"
     done
-    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$candidate_meta"; then
+    if _USER_KEEP_LATEST_DB=1 _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$candidate_meta"; then
       _install_ok=1
     else
       warn "协议安装/更新失败，已返回上一级。"
@@ -9615,7 +9695,7 @@ protocol_remove_menu() {
     local db_json
     sync_user_usage_counters || true
     db_json="$(user_db_load)"
-    if _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
+    if _USER_KEEP_LATEST_DB=1 _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json"; then
       _apply_ok=1
     else
       warn "协议卸载失败，已返回上一级。"

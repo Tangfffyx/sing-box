@@ -17,8 +17,8 @@ ensure_deps_for_installer() {
   install_pkg openssl
   install_pkg tar
   case "$PKG_MANAGER" in
-    apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip ;;
-    apk) install_pkg ca-certificates; install_pkg gcompat ;;
+    apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip; install_pkg util-linux ;;
+    apk) install_pkg ca-certificates; install_pkg gcompat; install_pkg flock ;;
   esac
 }
 
@@ -479,11 +479,12 @@ singbox_command_exists() {
 }
 
 prepare_script_runtime() {
-  migrate_legacy_script_name
-  write_managed_singbox_service
-  ensure_command_compat_links
-  mkdir -p /var/log/sing-box >/dev/null 2>&1 || true
-  [ "$INIT_SYSTEM" = "systemd" ] && systemctl daemon-reload >/dev/null 2>&1 || true
+  migrate_legacy_script_name || return 1
+  write_managed_singbox_service || return 1
+  ensure_command_compat_links || return 1
+  mkdir -p /var/log/sing-box || return 1
+  if [ "$INIT_SYSTEM" = "systemd" ]; then systemctl daemon-reload || return 1; fi
+  return 0
 }
 
 # ---------- 安装/更新 sing-box ----------
@@ -499,8 +500,6 @@ install_or_update_singbox() {
   case "$arch" in
     x86_64) file="sing-box-linux-amd64.tar.gz" ;;
     aarch64|arm64) file="sing-box-linux-arm64.tar.gz" ;;
-    armv7l|armv7) file="sing-box-linux-armv7.tar.gz" ;;
-    i386|i686) file="sing-box-linux-386.tar.gz" ;;
     *)
       err "不支持的架构：$arch"
       pause
@@ -536,6 +535,7 @@ install_or_update_singbox() {
     echo -e "最新版本：${G}${latest_ver}${NC}"
     if [ -n "${inst:-}" ] && version_ge "$inst" "$latest_ver"; then
       if is_install_complete; then
+        config_apply "$(config_load)" || { pause; return 1; }
         ok "当前已是最新版本。"
         pause
         return 0
@@ -560,7 +560,7 @@ install_or_update_singbox() {
   fi
 
   if [ "${managed_env}" = "1" ] && [ -x "$SINGBOX_BIN" ]; then
-    sync_user_usage_counters || true
+    sync_user_usage_counters || { pause; return 1; }
   fi
 
   tmp_dir="$(make_disk_tmp_dir sb-install)" || {
@@ -625,58 +625,19 @@ install_or_update_singbox() {
     return 1
   fi
 
-  # 事务边界开始：备份旧 binary → 原子替换。若 service 起不来则回滚 binary。
-  mkdir -p "$SINGBOX_INSTALL_DIR" /etc/sing-box
-  local _binary_backed_up=0
-  if [ -x "$SINGBOX_BIN" ]; then
-    if cp -a "$SINGBOX_BIN" "${SINGBOX_BIN}.bak"; then
-      _binary_backed_up=1
-    else
-      rm -rf "$tmp_dir"
-      err "无法备份旧 sing-box 二进制：${SINGBOX_BIN} → ${SINGBOX_BIN}.bak"
-      pause
-      return 1
-    fi
-  fi
-  if ! install -m 755 "$tmp_dir/sing-box" "$SINGBOX_BIN"; then
+  if ! ensure_grpcurl_logged || ! ensure_v2ray_api_proto_files; then
     rm -rf "$tmp_dir"
-    err "二进制写入失败：$SINGBOX_BIN"
-    if [ "$_binary_backed_up" = "1" ]; then
-      mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN" 2>/dev/null || true
-    fi
+    err "统计组件未就绪，已取消升级。"
+    pause
+    return 1
+  fi
+  if ! with_manager_lock install_candidate_singbox "$tmp_dir/sing-box" "$tag"; then
+    rm -rf "$tmp_dir"
     pause
     return 1
   fi
   rm -rf "$tmp_dir"
-
-  ensure_grpcurl_logged || true
-  ensure_v2ray_api_proto_files || true
-
-  prepare_script_runtime
-  config_ensure_exists
-  config_force_access_log_settings || true
-  if ! _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
-    # 事务边界：service 启动失败必须回滚旧 binary，保证用户不被卡在"装了新版但起不来"状态
-    if [ "$_binary_backed_up" = "1" ]; then
-      err "sing-box 服务启动失败，正在回滚到旧二进制..."
-      if mv -f "${SINGBOX_BIN}.bak" "$SINGBOX_BIN"; then
-        if _SINGBOX_ENABLE_QUIET_OK=1 enable_now_singbox_safe; then
-          warn "已回滚到旧 sing-box，新版本未安装成功。请检查日志后再次执行 1. 安装/更新。"
-        else
-          err "回滚后服务仍无法启动，请检查 $SINGBOX_BIN 与日志。"
-        fi
-      else
-        err "二进制回滚失败：${SINGBOX_BIN}.bak → ${SINGBOX_BIN}。请手动恢复。"
-      fi
-    else
-      err "sing-box 服务启动失败（首次安装，无旧版本可回滚）。"
-      rm -f "$SINGBOX_BIN" >/dev/null 2>&1 || true
-    fi
-    pause
-    return 1
-  fi
-  _binary_backed_up=0
-  # 事务边界结束：service 已起来，后续步骤失败仅 warn，不回滚 binary 也不阻塞 stamp 写入
+  # 内核事务已提交；可重试的菜单/cron 初始化不影响已验证的内核。
   ensure_sb_shortcut || true
   ensure_user_manager_ready || warn "用户数据库初始化失败，用户管理菜单进入时会重试初始化。"
   install_periodic_sync_cron || warn "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
@@ -690,15 +651,87 @@ install_or_update_singbox() {
   user_manager_background_sync || warn "用户管理后台同步初始化失败。下次 periodic-sync cron 会重试。"
   tg_refresh_after_singbox_install || true
 
-  # 走到这里说明 service 已经起来（事务化保证）；后续步骤即使失败也只 warn，不影响 stamp
-  echo "$tag" > "$SINGBOX_VERSION_STAMP" || {
-    err "安装标记写入失败：$SINGBOX_VERSION_STAMP"
-    pause
-    return 1
-  }
-  rm -f "${SINGBOX_BIN}.bak" >/dev/null 2>&1 || true
   ok "安装完成。"
   pause
+}
+
+# 调用方持管理锁。候选文件在正式路径之外完成校验；保留最近一次成功版本。
+install_candidate_singbox() {
+  local candidate="$1" tag="$2" next_config old_config next_bin old_bin stamp_tmp had_config=0 had_bin=0
+  mkdir -p "$SINGBOX_INSTALL_DIR" "$(dirname "$CONFIG_FILE")" || return 1
+  if [ -e "$CONFIG_FILE" ]; then
+    jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null || { err "现有配置无效，已取消升级。"; return 1; }
+    had_config=1
+  fi
+  next_config="$(mktemp "${CONFIG_FILE}.upgrade.XXXXXX")" || return 1
+  if [ "$had_config" = 1 ]; then
+    config_normalize "$(cat "$CONFIG_FILE")" > "$next_config" || { rm -f "$next_config"; return 1; }
+  else
+    config_normalize "$(config_min_template)" > "$next_config" || { rm -f "$next_config"; return 1; }
+  fi
+  if ! "$candidate" check -c "$next_config"; then
+    rm -f "$next_config"
+    err "新内核不接受当前配置，正式文件未替换。"
+    return 1
+  fi
+  sync_user_usage_counters || { rm -f "$next_config"; return 1; }
+  old_config="$(mktemp "${CONFIG_FILE}.rollback.XXXXXX")" || { rm -f "$next_config"; return 1; }
+  if [ "$had_config" = 1 ]; then
+    cp -p "$CONFIG_FILE" "$old_config" || { rm -f "$old_config" "$next_config"; return 1; }
+  fi
+  next_bin="$(mktemp "${SINGBOX_BIN}.new.XXXXXX")" || { rm -f "$old_config" "$next_config"; return 1; }
+  old_bin="$(mktemp "${SINGBOX_BIN}.rollback.XXXXXX")" || { rm -f "$next_bin" "$old_config" "$next_config"; return 1; }
+  if [ -x "$SINGBOX_BIN" ]; then
+    had_bin=1
+    cp -p "$SINGBOX_BIN" "$old_bin" || { rm -f "$old_bin" "$next_bin" "$old_config" "$next_config"; return 1; }
+  fi
+  if ! install -m 755 "$candidate" "$next_bin"; then
+    rm -f "$old_bin" "$next_bin" "$old_config" "$next_config"
+    return 1
+  fi
+  stamp_tmp="$(mktemp "${SINGBOX_VERSION_STAMP}.tmp.XXXXXX")" || {
+    rm -f "$old_bin" "$next_bin" "$old_config" "$next_config"; return 1;
+  }
+  if ! printf '%s\n' "$tag" > "$stamp_tmp"; then
+    rm -f "$stamp_tmp" "$old_bin" "$next_bin" "$old_config" "$next_config"; return 1
+  fi
+  if mv -f "$next_bin" "$SINGBOX_BIN" && mv -f "$next_config" "$CONFIG_FILE" &&
+      prepare_script_runtime && _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe &&
+      mv -f "$stamp_tmp" "$SINGBOX_VERSION_STAMP"; then
+    if [ "$had_bin" = 1 ]; then
+      mv -f "$old_bin" "${SINGBOX_BIN}.bak" || warn "旧内核保留于 $old_bin"
+    else
+      rm -f "$old_bin"
+    fi
+    if [ "$had_config" = 1 ]; then
+      mv -f "$old_config" "${CONFIG_FILE}.bak.upgrade" || warn "旧配置保留于 $old_config"
+    else
+      rm -f "$old_config"
+    fi
+    case "$INIT_SYSTEM" in
+      systemd) systemctl enable sing-box >/dev/null 2>&1 || warn "设置自启失败。" ;;
+      openrc) openrc_enable_service sing-box default >/dev/null 2>&1 || warn "设置自启失败。" ;;
+    esac
+    return 0
+  fi
+  err "升级未通过运行检查，正在恢复旧内核及配置。"
+  rm -f "$next_bin" "$next_config" "$stamp_tmp"
+  if [ "$had_config" = 1 ]; then
+    mv -f "$old_config" "$CONFIG_FILE" || { err "配置回滚失败，备份：$old_config"; return 1; }
+  else
+    rm -f "$CONFIG_FILE" "$old_config"
+  fi
+  if [ "$had_bin" = 1 ]; then
+    mv -f "$old_bin" "$SINGBOX_BIN" || { err "内核回滚失败，备份：$old_bin"; return 1; }
+    _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe || err "旧内核恢复后启动失败，请检查服务日志。"
+  else
+    case "$INIT_SYSTEM" in
+      systemd) systemctl stop sing-box >/dev/null 2>&1 || true ;;
+      openrc) rc-service sing-box stop >/dev/null 2>&1 || true ;;
+    esac
+    rm -f "$SINGBOX_BIN" "$old_bin"
+  fi
+  return 1
 }
 
 # ---------- 时间同步 ----------

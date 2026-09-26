@@ -1901,12 +1901,16 @@ tg_task_exec_set_reset_day() {
 }
 
 tg_execute_task() {
+  with_manager_lock _tg_execute_task_body "$@"
+}
+
+_tg_execute_task_body() {
   local task="$1" action username db_json exists params result
   action="$(echo "$task" | jq -r '.action // empty')"
   username="$(echo "$task" | jq -r '.username // empty')"
   [ -n "$action" ] && [ -n "$username" ] || { echo "任务参数不完整。"; return 1; }
   user_db_exists || { echo "用户数据库不存在。"; return 1; }
-  sync_user_usage_counters || true
+  sync_user_usage_counters || return 1
   db_json="$(user_db_load)"
   exists="$(echo "$db_json" | jq -r --arg u "$username" 'if .users[$u] then "1" else "0" end')"
   [ "$exists" = "1" ] || { echo "用户不存在：$username"; return 1; }

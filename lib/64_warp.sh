@@ -287,7 +287,7 @@ warp_config_project_json() {
             )
         )
         + (if $ready then
-            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, download_detour:"direct"}))
+            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, http_client:{version:2,detour:"direct"}}))
           else [] end)
       )
     | .outbounds = (
