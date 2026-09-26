@@ -127,10 +127,10 @@ ensure_v2ray_api_on_json() {
 v2ray_api_query() {
   local method="$1" payload="$2"
   [ -x "$GRPCURL_BIN" ] || { warn "缺少 grpcurl，统计不可用。"; return 1; }
-  [ -s "$V2RAY_PROTO_EXP" ] || ensure_v2ray_api_proto_files || return 1
+  [ -s "$V2RAY_PROTO_V2RAY" ] || ensure_v2ray_api_proto_files || return 1
   "$GRPCURL_BIN" -plaintext -connect-timeout 2 -max-time 3 \
-    -import-path "$(dirname "$V2RAY_PROTO_EXP")" -proto "$(basename "$V2RAY_PROTO_EXP")" \
-    -d "$payload" "$V2RAY_API_LISTEN" "experimental.v2rayapi.StatsService/$method"
+    -import-path "$(dirname "$V2RAY_PROTO_V2RAY")" -proto "$(basename "$V2RAY_PROTO_V2RAY")" \
+    -d "$payload" "$V2RAY_API_LISTEN" "v2ray.core.app.stats.command.StatsService/$method"
 }
 
 query_v2ray_api_stats_json() {

@@ -30,6 +30,8 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 
 本轮保留 1.13/1.14 现有配置格式，HTTP client 字段迁移、默认拒绝规则迁移和 TG HTTPS/独立节点凭证另行处理。流量仍是周期采样，进程异常退出前未采样的尾部流量无法恢复；外部短时间连续 HUP 也不能保证精确识别，建议使用脚本的服务操作。
 
+VPS 验收步骤见 [测试清单](docs/TESTING.md)。
+
 开发验证：`bash tests/check.sh`。CI 在 Ubuntu、Alpine 运行回归测试，并对自行编译的 1.14.2 内核执行回环网络计费和用户拒绝测试。服务管理回归使用模拟 systemd/OpenRC 命令，不替代真实 VPS 的升级验收。
 
 ## 卸载说明

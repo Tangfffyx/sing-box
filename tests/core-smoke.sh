@@ -27,10 +27,9 @@ PY
 )
 GRPCURL_BIN="$GRPC"
 V2RAY_API_LISTEN="127.0.0.1:$api_port"
-V2RAY_PROTO_EXP="$TMP_SMOKE/stats.proto"
-# Extract the exact proto shipped by the script without writing /etc.
-sed -n "/^syntax = \"proto3\";/,/^EOF_V2E/p" lib/50_v2ray_api.sh | sed '/^EOF_V2E/,$d' > "$V2RAY_PROTO_EXP"
-# sed range above stops once EOF_V2E is reached via the second sed.
+V2RAY_PROTO_V2RAY="$TMP_SMOKE/stats.proto"
+# Extract the runtime service proto (upstream overrides the generated service name).
+awk '/^package v2ray.core.app.stats.command;/ { print "syntax = \"proto3\";"; printing=1 } /^EOF_V2V$/ { exit } printing { print }' lib/50_v2ray_api.sh > "$V2RAY_PROTO_V2RAY"
 jq -n --argjson socks "$socks_port" --arg api "$V2RAY_API_LISTEN" '{
  inbounds:[{type:"socks",tag:"socks-test",listen:"127.0.0.1",listen_port:$socks,users:[{username:"node@alice",password:"fixture"},{username:"node@disabled",password:"fixture"}]}],
  outbounds:[{type:"direct",tag:"direct"},{type:"block",tag:"reject"}],
@@ -51,6 +50,7 @@ start_core() {
     sleep 0.25
   done
   cat "$TMP_SMOKE/core.log"
+  query_v2ray_api_uptime || true
   return 1
 }
 INIT_SYSTEM=systemd
