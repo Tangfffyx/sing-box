@@ -7,6 +7,7 @@ for module in 00_base 01_utils 10_config 60_user_db 61_user_manager 63_telegram_
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 USER_DB_FILE="$T/users.json"; SB_LOCK_FILE="$T/lock"
 sync_user_usage_counters() { :; }
+user_db_save() { printf '%s\n' "$1" > "$USER_DB_FILE"; }
 tg_task_apply_db() { user_db_save "$1"; }
 echo '{"enabled":true,"users":{"admin":{"enabled":true},"alice":{"enabled":true,"expire_at":"0","used_down_bytes":123}}}' > "$USER_DB_FILE"
 run_task() { tg_execute_task "$(jq -nc --arg action "$1" --argjson params "$2" '{username:"alice",action:$action,params:$params}')" >/dev/null; }

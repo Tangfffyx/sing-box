@@ -22,7 +22,7 @@ echo "$pair"|awk '/PublicKey/ {print $2}' > "$out/public.key"
 } | jq -s --arg crt "$out/cert.pem" --arg key "$out/key.pem" --argjson handshake "$((base+10))" '
  map(.listen="127.0.0.1" | if .tls.certificate_path? then .tls.certificate_path=$crt | .tls.key_path=$key else . end
  | if .tls.reality? then .tls.reality.handshake={server:"127.0.0.1",server_port:$handshake} else . end)
- | {inbounds:.,outbounds:[{type:"direct",tag:"direct"}],route:{rules:[]}}
+ | {log:{level:"info"},inbounds:.,outbounds:[{type:"direct",tag:"direct"}],route:{rules:[]}}
 ' > "$out/base.json"
 db='{"users":{"admin":{"enabled":true},"alice":{"enabled":true,"allow_all_nodes":true},"bob":{"enabled":false,"allow_all_nodes":true}}}'
 V2RAY_API_LISTEN="127.0.0.1:$((base+9))"

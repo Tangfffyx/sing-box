@@ -17,11 +17,11 @@ echo '{"version":3,"rules":[{"ip_cidr":["127.0.0.1/32"]}]}' > "$T/rules.json"
 sing-box rule-set compile -o "$T/test.srs" "$T/rules.json"
 printf payload > "$T/payload"
 python3 -m http.server "$http_port" --bind 127.0.0.1 --directory "$T" > "$T/http.log" 2>&1 & pids+=("$!")
-jq -nc --argjson port "$landing_port" '{inbounds:[{type:"socks",listen:"127.0.0.1",listen_port:$port}],outbounds:[{type:"direct",tag:"direct"}]}' > "$T/landing.json"
+jq -nc --argjson port "$landing_port" '{log:{level:"info"},inbounds:[{type:"socks",listen:"127.0.0.1",listen_port:$port}],outbounds:[{type:"direct",tag:"direct"}]}' > "$T/landing.json"
 sing-box run -c "$T/landing.json" > "$T/landing.log" 2>&1 & pids+=("$!")
 V2RAY_API_LISTEN="127.0.0.1:$api_port"; V2RAY_PROTO_V2RAY="$T/stats.proto"; ensure_v2ray_api_proto_files
 entry="socks-$entry_port"
-base=$(build_socks_inbound "$entry_port" fixture|jq '{inbounds:[(.listen="127.0.0.1")],outbounds:[{type:"direct",tag:"direct"}],route:{rules:[]}}')
+base=$(build_socks_inbound "$entry_port" fixture|jq '{log:{level:"info"},inbounds:[(.listen="127.0.0.1")],outbounds:[{type:"direct",tag:"direct"}],route:{rules:[]}}')
 url="http://localhost:$http_port/test.srs"
 for mode in full partial warp; do
   auth="$entry"; tag=''

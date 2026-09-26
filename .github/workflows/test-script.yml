@@ -34,7 +34,7 @@ jobs:
       - name: Build core and statistics client
         run: |
           cd upstream
-          go build -tags with_v2ray_api,with_quic,with_utls -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
+          CGO_ENABLED=0 go build -tags with_v2ray_api,with_quic,with_utls -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
           go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3
       - name: Real core loopback smoke test
         run: bash tests/core-smoke.sh "$RUNNER_TEMP/sing-box" "$(go env GOPATH)/bin/grpcurl"

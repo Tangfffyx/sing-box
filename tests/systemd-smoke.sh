@@ -39,7 +39,7 @@ ExecStart=$SINGBOX_BIN run -c $CONFIG_FILE
 Restart=no
 UNIT
 command systemctl daemon-reload
-base=$(build_socks_inbound "$socks_port" fixture | jq '{inbounds:[(.listen="127.0.0.1")],outbounds:[{type:"direct",tag:"direct"}],route:{rules:[]}}')
+base=$(build_socks_inbound "$socks_port" fixture | jq '{log:{level:"info"},inbounds:[(.listen="127.0.0.1")],outbounds:[{type:"direct",tag:"direct"}],route:{rules:[]}}')
 db='{"enabled":true,"users":{"admin":{"enabled":true},"alice":{"enabled":true,"allow_all_nodes":true,"quota_gb":10,"used_up_bytes":0,"used_down_bytes":0}}}'
 printf '%s' "$db" > "$USER_DB_FILE"
 user_manager_apply_to_json "$base" "$db" '{}' > "$CONFIG_FILE"
