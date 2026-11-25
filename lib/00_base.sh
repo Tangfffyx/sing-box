@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.1.9"
+SCRIPT_VERSION="6.2.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -157,11 +157,12 @@ table_print_row() {
 # 协议注册表 — 所有协议定义的唯一权威来源
 # 新增协议：只需在此注册 + 写 builder + 写 exporter
 # ====================================================
-SUPPORTED_PROTOCOLS=(vless-reality anytls shadowsocks socks trojan vmess-ws vless-ws tuic)
+SUPPORTED_PROTOCOLS=(vless-reality anytls hysteria2 shadowsocks socks trojan vmess-ws vless-ws tuic)
 
 declare -A PROTO_PREFIX=(
   [vless-reality]=reality
   [anytls]=anytls
+  [hysteria2]=hy2
   [shadowsocks]=ss
   [trojan]=trojan
   [vmess-ws]=vmess-ws
@@ -179,6 +180,7 @@ unset proto
 declare -A PROTO_TRANSPORT=(
   [vless-reality]=tcp
   [anytls]=tcp
+  [hysteria2]=udp
   [shadowsocks]="tcp udp"
   [trojan]=tcp
   [vmess-ws]=tcp
@@ -216,6 +218,7 @@ JQ_DETECT_PROTOCOL='
 def detect_protocol:
   if .type == "vless" and (.tls.reality.enabled // false) then "vless-reality"
   elif .type == "anytls" then "anytls"
+  elif .type == "hysteria2" then "hysteria2"
   elif .type == "shadowsocks" then "shadowsocks"
   elif .type == "trojan" then "trojan"
   elif .type == "vmess" and ((.transport.type // "") == "ws") then "vmess-ws"
@@ -246,18 +249,38 @@ JQ_PROTOCOL_SORT='
 def protocol_sort_index($tag):
   if ($tag | startswith("reality-")) then 0
   elif ($tag | startswith("anytls-")) then 1
-  elif ($tag | startswith("ss-")) then 2
-  elif ($tag | startswith("socks-")) then 3
-  elif ($tag | startswith("trojan-")) then 4
-  elif ($tag | startswith("vmess-ws-")) then 5
-  elif ($tag | startswith("vless-ws-")) then 6
-  elif ($tag | startswith("tuic-")) then 7
+  elif ($tag | startswith("hy2-")) then 2
+  elif ($tag | startswith("ss-")) then 3
+  elif ($tag | startswith("socks-")) then 4
+  elif ($tag | startswith("trojan-")) then 5
+  elif ($tag | startswith("vmess-ws-")) then 6
+  elif ($tag | startswith("vless-ws-")) then 7
+  elif ($tag | startswith("tuic-")) then 8
   else 99
   end;
 '
 
 # 组合：常用 jq 前缀（包含所有共享定义）
 JQ_SHARED="${JQ_DETECT_PROTOCOL}${JQ_AUTH_USERS}${JQ_NODE_PART}${JQ_PROTOCOL_SORT}"
+
+# 由注册表派生排序定义，覆盖上面作为 bash 3 回退保留的静态版本；
+# 新增协议只需改 SUPPORTED_PROTOCOLS/PROTO_PREFIX，排序自动跟随。
+# 注意：这段必须在 JQ_SHARED= 之后，tests/reliability.sh 在 bash 3 下只截取
+# JQ_DETECT_PROTOCOL 到 JQ_SHARED 之间的静态定义，不会执行到这里。
+{
+  _jq_sort_lines=('def protocol_sort_index($tag):')
+  _jq_sort_i=0
+  for _jq_sort_proto in "${SUPPORTED_PROTOCOLS[@]}"; do
+    _jq_sort_prefix="${PROTO_PREFIX[$_jq_sort_proto]}"
+    if [ "$_jq_sort_i" -eq 0 ]; then _jq_sort_kw='if'; else _jq_sort_kw='elif'; fi
+    _jq_sort_lines+=("  ${_jq_sort_kw} (\$tag | startswith(\"${_jq_sort_prefix}-\")) then ${_jq_sort_i}")
+    _jq_sort_i=$((_jq_sort_i + 1))
+  done
+  _jq_sort_lines+=('  else 99' '  end;')
+  JQ_PROTOCOL_SORT="$(printf '%s\n' "${_jq_sort_lines[@]}")"
+  JQ_SHARED="${JQ_DETECT_PROTOCOL}${JQ_AUTH_USERS}${JQ_NODE_PART}${JQ_PROTOCOL_SORT}"
+  unset _jq_sort_lines _jq_sort_i _jq_sort_proto _jq_sort_prefix _jq_sort_kw
+}
 
 # ====================================================
 # 节点排序基础设施 — bash 层面的协议排序
