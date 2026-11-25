@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Real TCP/UDP loopback tests of all eight production protocol builders."""
+"""Real TCP/UDP loopback tests of all nine production protocol builders."""
 import contextlib, functools, http.server, json, os, pathlib, socket, struct, subprocess, sys, tempfile, threading, time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CORE = os.environ.get('SB_TEST_CORE', '/usr/local/bin/sing-box')
-PROTOCOLS = ['reality', 'anytls', 'shadowsocks', 'socks', 'trojan', 'vmess-ws', 'vless-ws', 'tuic']
+PROTOCOLS = ['reality', 'anytls', 'hysteria2', 'shadowsocks', 'socks', 'trojan', 'vmess-ws', 'vless-ws', 'tuic']
 
 def free_base():
     for base in range(32000, 54000, 37):
         sockets = []
         try:
-            for port in range(base, base+12):
+            for port in range(base, base+13):
                 for kind in [socket.SOCK_STREAM, socket.SOCK_DGRAM]:
                     s = socket.socket(socket.AF_INET, kind); sockets.append(s); s.bind(('127.0.0.1', port))
             return base
@@ -45,9 +45,11 @@ def outbound(ib, public):
     if 'tls' in ib:
         out['tls'] = {'enabled':True, 'server_name':'localhost', 'insecure':True}
         if 'alpn' in ib['tls']: out['tls']['alpn'] = ib['tls']['alpn']
-        if 'reality' in ib['tls']:
-            out['tls'].pop('insecure')
-            out['tls'].update(utls={'enabled':True,'fingerprint':'chrome'}, reality={'enabled':True,'public_key':public,'short_id':'abcd'})
+    if 'obfs' in ib:
+        out['obfs'] = ib['obfs']
+    if 'tls' in ib and 'reality' in ib['tls']:
+        out['tls'].pop('insecure')
+        out['tls'].update(utls={'enabled':True,'fingerprint':'chrome'}, reality={'enabled':True,'public_key':public,'short_id':'abcd'})
     return out
 
 def tcp(proxy, target, expected):
@@ -81,9 +83,9 @@ with tempfile.TemporaryDirectory(prefix='sb-protocol-') as directory:
     (d/'payload').write_bytes(b'x'*65536)
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def log_message(self,*args): pass
-    http=http.server.ThreadingHTTPServer(('127.0.0.1',base+8),functools.partial(Quiet,directory=d))
+    http=http.server.ThreadingHTTPServer(('127.0.0.1',base+9),functools.partial(Quiet,directory=d))
     threading.Thread(target=http.serve_forever,daemon=True).start()
-    echo=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);echo.bind(('127.0.0.1',base+8))
+    echo=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);echo.bind(('127.0.0.1',base+9))
     def echo_loop():
         while True:
             try: data,addr=echo.recvfrom(65535);echo.sendto(data,addr)
@@ -91,15 +93,15 @@ with tempfile.TemporaryDirectory(prefix='sb-protocol-') as directory:
     threading.Thread(target=echo_loop,daemon=True).start()
     allowed=json.loads((d/'allowed.json').read_text());public=(d/'public.key').read_text().strip()
     try:
-        with process(['openssl','s_server','-accept',f'127.0.0.1:{base+10}','-cert',str(d/'cert.pem'),'-key',str(d/'key.pem'),'-tls1_3','-www'],d/'tls.log'):
+        with process(['openssl','s_server','-accept',f'127.0.0.1:{base+11}','-cert',str(d/'cert.pem'),'-key',str(d/'key.pem'),'-tls1_3','-www'],d/'tls.log'):
             for state in ['allowed','disabled','unassigned']:
                 with process([CORE,'run','-c',str(d/f'{state}.json')],d/'server.log'):
                     for proto,ib in zip(PROTOCOLS,allowed['inbounds']):
-                        c={'inbounds':[{'type':'socks','tag':'client','listen':'127.0.0.1','listen_port':base+11}], 'outbounds':[outbound(ib,public)],'route':{'final':'proxy'}}
+                        c={'inbounds':[{'type':'socks','tag':'client','listen':'127.0.0.1','listen_port':base+12}], 'outbounds':[outbound(ib,public)],'route':{'final':'proxy'}}
                         (d/'client.json').write_text(json.dumps(c))
                         with process([CORE,'run','-c',str(d/'client.json')],d/'client.log'):
-                            tcp(base+11,base+8,state=='allowed')
-                            if state=='allowed': udp(base+11,base+8)
+                            tcp(base+12,base+9,state=='allowed')
+                            if state=='allowed': udp(base+12,base+9)
                         print(f'PASS {proto}: {state}'+(' TCP+UDP' if state=='allowed' else ' denied'),flush=True)
     except Exception:
         for name in ['server.log','client.log','tls.log']:
