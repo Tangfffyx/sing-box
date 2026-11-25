@@ -98,6 +98,25 @@ build_v2rayn_tuic_link() {
     "$(url_encode "$name")"
 }
 
+build_v2rayn_hysteria2_link() {
+  local server="$1" port="$2" password="$3" sni="$4" obfs_type="$5" obfs_pass="$6" name="$7"
+  local query="sni=$(url_encode "$sni")"
+  if [ -n "$obfs_type" ]; then
+    query="${query}&obfs=$(url_encode "$obfs_type")&obfs-password=$(url_encode "$obfs_pass")"
+  fi
+  # 认证密码不做 url_encode：与 AnyTLS 链接同理，客户端不对 userinfo 做 URL 解码，
+  # base64 字符集（A-Za-z0-9+/=）在 userinfo 中无歧义，可直接使用。
+  # port 可能是单个端口（443）或跳跃范围（30000-40000），由调用方决定。
+  printf 'hysteria2://%s@%s:%s/?%s#%s' \
+    "$password" "$server" "$port" "$query" "$(url_encode "$name")"
+}
+
+# 从 meta 取某 hy2 节点的跳跃范围 "30000-40000"，没有返回空。
+hy2_export_hop_range() {
+  local tag="$1"
+  hy2_hop_range_from_meta "$(meta_load 2>/dev/null)" "$tag"
+}
+
 # ---------- 导出上下文收集 ----------
 
 export_collect_context() {
@@ -126,8 +145,9 @@ export_configs() {
   init_manager_env || { pause; return 0; }
   clear
   local json ctx ip ws_domain vm_domain relay_users_nl
-  local tag proto port sni path sid method server_p
+  local tag proto port sni path sid method server_p obfs_type obfs_pass
   local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
+  local hop_range qx_line clash_line
   json="$(config_load)"
   ctx="$(export_collect_context "$json")"
   IFS=$'\x01' read -r ip ws_domain vm_domain < <(
@@ -148,12 +168,12 @@ export_configs() {
   trap '_export_cleanup; trap - RETURN' RETURN
 
   while read -r inbound; do
-    IFS=$'\x01' read -r tag proto port sni path sid method server_p < <(
+    IFS=$'\x01' read -r tag proto port sni path sid method server_p obfs_type obfs_pass < <(
       echo "$inbound" | jq -r "${JQ_DETECT_PROTOCOL}"'
         [(.tag // ""), detect_protocol, ((.listen_port // 0) | tostring),
          (.tls.server_name // "www.icloud.com"), (.transport.path // "/"),
          (.tls.reality.short_id[0] // ""), (.method // "2022-blake3-aes-128-gcm"),
-         (.password // "")] | join("\u0001")
+         (.password // ""), (.obfs.type // ""), (.obfs.password // "")] | join("\u0001")
       '
     )
 
@@ -256,6 +276,42 @@ export_configs() {
             echo -e " Quantumult X: vless=$ip:443,method=none,password=${uuid},obfs=wss,obfs-host=${ws_domain},obfs-uri=${path}?ed=2048,fast-open=false,udp-relay=true,tag=${out_name}"
             echo ""
             v2rayn_link="$(build_v2rayn_vless_ws_link "$ip" "$uuid" "$ws_domain" "${path}?ed=2048" "$out_name")"
+            echo -e " 通用链接: ${v2rayn_link}"
+          } >> "$target_file"
+          ;;
+        hysteria2)
+          [ -z "$pass" ] && continue
+          hop_range="$(hy2_export_hop_range "$tag")"
+          {
+            echo -e "\n${W}[${out_name}]${NC}"
+            clash_line=" Clash: - {name: ${out_name}, type: hysteria2, server: $ip, port: $port, password: $pass, sni: $sni, skip-cert-verify: true"
+            if [ -n "$obfs_type" ]; then
+              clash_line="${clash_line}, obfs: ${obfs_type}, obfs-password: ${obfs_pass}"
+            fi
+            if [ -n "$hop_range" ]; then
+              clash_line="${clash_line}, ports: \"${hop_range}\", hop-interval: 30"
+            fi
+            clash_line="${clash_line}}"
+            echo -e "$clash_line"
+            echo ""
+            # QX：基础端口就是监听端口，跳跃范围单独用 port-hopping 写
+            qx_line=" Quantumult X: hysteria2=${ip}:${port}, password=${pass}, tls-host=${sni}, tls-verification=false, udp-relay=true"
+            if [ -n "$hop_range" ]; then
+              qx_line="${qx_line}, port-hopping=${hop_range}"
+            fi
+            if [ "$obfs_type" = "gecko" ]; then
+              qx_line="${qx_line}, gecko-password=${obfs_pass}"
+            elif [ "$obfs_type" = "salamander" ]; then
+              qx_line="${qx_line}, salamander-password=${obfs_pass}"
+            fi
+            qx_line="${qx_line}, tag=${out_name}"
+            echo -e "$qx_line"
+            echo ""
+            if [ -n "$hop_range" ]; then
+              v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$hop_range" "$pass" "$sni" "$obfs_type" "$obfs_pass" "$out_name")"
+            else
+              v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$port" "$pass" "$sni" "$obfs_type" "$obfs_pass" "$out_name")"
+            fi
             echo -e " 通用链接: ${v2rayn_link}"
           } >> "$target_file"
           ;;
