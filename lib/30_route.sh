@@ -86,6 +86,147 @@ port_conflict_for_protocol() {
   return 1
 }
 
+# ====================================================
+# Hysteria2 端口跳跃
+# sing-box 只监听一个 UDP 端口；跳跃靠防火墙把一段 UDP 端口重定向到监听端口。
+# 跳跃范围存在 meta.json（config.json 没有这个字段），按 entry_key 记，如 hy2-443。
+# ====================================================
+
+HY2_HOP_DEFAULT_START=30000
+HY2_HOP_DEFAULT_END=40000
+
+hy2_hop_range_valid() {
+  local start="$1" end="$2" listen_port="$3"
+  [[ "$start" =~ ^[0-9]+$ ]] && [[ "$end" =~ ^[0-9]+$ ]] && [[ "$listen_port" =~ ^[0-9]+$ ]] || return 1
+  [ "$start" -ge 1024 ] && [ "$end" -le 65535 ] && [ "$end" -gt "$start" ] || return 1
+  # 范围不能包含监听端口
+  { [ "$listen_port" -lt "$start" ] || [ "$listen_port" -gt "$end" ]; } || return 1
+  return 0
+}
+
+# 解析 "30000-40000" 为 _HOP_START/_HOP_END，格式不对返回 1。
+hy2_parse_hop_range() {
+  local range="${1:-}"
+  [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]] || return 1
+  _HOP_START="${BASH_REMATCH[1]}"
+  _HOP_END="${BASH_REMATCH[2]}"
+}
+
+hy2_hop_range_from_meta() {
+  local meta_json="${1:-}" tag="$2"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq -r --arg t "$tag" '
+    (.[$t].hop_start // null) as $s | (.[$t].hop_end // null) as $e
+    | if ($s != null and $e != null) then "\($s)-\($e)" else "" end'
+}
+
+hy2_hop_range_set_in_meta() {
+  local meta_json="${1:-}" tag="$2" start="$3" end="$4"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq --arg t "$tag" --argjson s "$start" --argjson e "$end" \
+    '.[$t] = ((.[$t] // {}) + {hop_start:$s, hop_end:$e})'
+}
+
+hy2_hop_range_del_from_meta() {
+  local meta_json="${1:-}" tag="$2"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq --arg t "$tag" '
+    del(.[$t].hop_start, .[$t].hop_end)
+    | if (.[$t] // null) == {} then del(.[$t]) else . end'
+}
+
+# 指定的范围是否已被其它 hy2 节点占用（排除自己，用于重装换范围时判断）。
+hy2_hop_range_in_use_by_meta() {
+  local meta_json="${1:-}" start="$2" end="$3" exclude_tag="${4:-}"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq -e --argjson s "$start" --argjson e "$end" --arg ex "$exclude_tag" '
+    [ to_entries[]
+      | select((.key | startswith("hy2-")) and .key != $ex)
+      | (.value.hop_start // null) as $hs | (.value.hop_end // null) as $he
+      | select($hs != null and $he != null)
+      | select(($s <= $he) and ($e >= $hs)) ] | length > 0' >/dev/null 2>&1
+}
+
+hy2_hop_rule_present() {
+  local table_cmd="$1" start="$2" end="$3" port="$4"
+  "$table_cmd" -t nat -C PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null
+}
+
+# 仅在没有 iptables 时的 nft 兜底（有 iptables 的系统走 iptables-nft 即可）。
+hy2_hop_apply_nft() {
+  local start="$1" end="$2" port="$3"
+  if nft list ruleset 2>/dev/null | grep -Fq "udp dport ${start}-${end} redirect to :${port}"; then return 0; fi
+  nft add table ip nat 2>/dev/null || true
+  nft add chain ip nat prerouting '{ type nat hook prerouting priority 0; }' 2>/dev/null || true
+  nft add rule ip nat prerouting udp dport "${start}-${end}" redirect to ":${port}" || return 1
+}
+
+# 持久化重定向规则：只用已装好的工具保存，不自动装包；
+# 保存不了返回 1，由调用方明确提醒用户手动保存，不悄悄跳过。
+hy2_hop_persist() {
+  if has_cmd netfilter-persistent; then
+    netfilter-persistent save >/dev/null 2>&1 && return 0
+  fi
+  if has_cmd iptables-save && [ -d /etc/iptables ]; then
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || return 1
+    if has_cmd ip6tables-save; then ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true; fi
+    return 0
+  fi
+  if [ "$PKG_MANAGER" = "apk" ] && has_cmd iptables-save; then
+    # Alpine OpenRC 的 iptables 服务从 /etc/iptables/rules-save 恢复
+    mkdir -p /etc/iptables 2>/dev/null || return 1
+    iptables-save > /etc/iptables/rules-save 2>/dev/null
+    return $?
+  fi
+  return 1
+}
+
+# 应用端口跳跃重定向（先查后加，重装不重复）。持久化失败只警告，不回滚已生效的规则。
+hy2_hop_apply() {
+  local start="$1" end="$2" port="$3"
+  local applied=0
+  if has_cmd iptables; then
+    if ! hy2_hop_rule_present iptables "$start" "$end" "$port"; then
+      iptables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" || return 1
+    fi
+    applied=1
+  fi
+  if has_cmd ip6tables; then
+    if ! hy2_hop_rule_present ip6tables "$start" "$end" "$port"; then
+      ip6tables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" || return 1
+    fi
+    applied=1
+  fi
+  if [ "$applied" -eq 0 ]; then
+    if has_cmd nft; then
+      hy2_hop_apply_nft "$start" "$end" "$port" || return 1
+    else
+      err "未找到 iptables/ip6tables/nft，无法设置端口跳跃重定向。"
+      return 1
+    fi
+  fi
+  if ! hy2_hop_persist; then
+    warn "端口跳跃规则已生效，但持久化失败：重启后规则会丢失。请手动保存，例如 Debian/Ubuntu：apt install -y iptables-persistent && netfilter-persistent save。"
+  fi
+  return 0
+}
+
+# 删除端口跳跃重定向（规则不存在也不报错）。调用前请先确认没有其它 hy2 节点还在用这个范围。
+hy2_hop_remove() {
+  local start="$1" end="$2" port="$3"
+  if has_cmd iptables; then
+    iptables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null || true
+  fi
+  if has_cmd ip6tables; then
+    ip6tables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null || true
+  fi
+  if ! has_cmd iptables && ! has_cmd ip6tables && has_cmd nft; then
+    warn "本机只有 nft 可用，跳跃规则需手动删除：nft delete rule ip nat prerouting udp dport ${start}-${end} redirect to :${port}（按 handle 删除更稳妥）。"
+  fi
+  hy2_hop_persist || warn "端口跳跃规则已删除，但持久化更新失败，重启后旧规则可能恢复，请手动保存。"
+  return 0
+}
+
 find_inbound_by_entry_key() {
   local json="$1" entry_key="$2"
   echo "$json" | jq -c --arg ek "$entry_key" '.inbounds[]? | select(.tag==$ek)' | head -n1
