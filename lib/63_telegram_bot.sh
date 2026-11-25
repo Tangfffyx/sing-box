@@ -257,7 +257,8 @@ tg_normalize_url() {
 }
 
 tg_api_request() {
-  local token="$1" method="$2" payload="${3:-{}}"
+  local token="$1" method="$2" payload="${3:-}"
+  [ -n "$payload" ] || payload='{}'
   [ -n "$token" ] || return 1
   curl -fsS --connect-timeout 10 --max-time 20 \
     -H "Content-Type: application/json" \
