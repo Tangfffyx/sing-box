@@ -16,7 +16,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.1.9"
+SCRIPT_VERSION="6.2.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -166,11 +166,12 @@ table_print_row() {
 # 协议注册表 — 所有协议定义的唯一权威来源
 # 新增协议：只需在此注册 + 写 builder + 写 exporter
 # ====================================================
-SUPPORTED_PROTOCOLS=(vless-reality anytls shadowsocks socks trojan vmess-ws vless-ws tuic)
+SUPPORTED_PROTOCOLS=(vless-reality anytls hysteria2 shadowsocks socks trojan vmess-ws vless-ws tuic)
 
 declare -A PROTO_PREFIX=(
   [vless-reality]=reality
   [anytls]=anytls
+  [hysteria2]=hy2
   [shadowsocks]=ss
   [trojan]=trojan
   [vmess-ws]=vmess-ws
@@ -188,6 +189,7 @@ unset proto
 declare -A PROTO_TRANSPORT=(
   [vless-reality]=tcp
   [anytls]=tcp
+  [hysteria2]=udp
   [shadowsocks]="tcp udp"
   [trojan]=tcp
   [vmess-ws]=tcp
@@ -225,6 +227,7 @@ JQ_DETECT_PROTOCOL='
 def detect_protocol:
   if .type == "vless" and (.tls.reality.enabled // false) then "vless-reality"
   elif .type == "anytls" then "anytls"
+  elif .type == "hysteria2" then "hysteria2"
   elif .type == "shadowsocks" then "shadowsocks"
   elif .type == "trojan" then "trojan"
   elif .type == "vmess" and ((.transport.type // "") == "ws") then "vmess-ws"
@@ -255,18 +258,38 @@ JQ_PROTOCOL_SORT='
 def protocol_sort_index($tag):
   if ($tag | startswith("reality-")) then 0
   elif ($tag | startswith("anytls-")) then 1
-  elif ($tag | startswith("ss-")) then 2
-  elif ($tag | startswith("socks-")) then 3
-  elif ($tag | startswith("trojan-")) then 4
-  elif ($tag | startswith("vmess-ws-")) then 5
-  elif ($tag | startswith("vless-ws-")) then 6
-  elif ($tag | startswith("tuic-")) then 7
+  elif ($tag | startswith("hy2-")) then 2
+  elif ($tag | startswith("ss-")) then 3
+  elif ($tag | startswith("socks-")) then 4
+  elif ($tag | startswith("trojan-")) then 5
+  elif ($tag | startswith("vmess-ws-")) then 6
+  elif ($tag | startswith("vless-ws-")) then 7
+  elif ($tag | startswith("tuic-")) then 8
   else 99
   end;
 '
 
 # 组合：常用 jq 前缀（包含所有共享定义）
 JQ_SHARED="${JQ_DETECT_PROTOCOL}${JQ_AUTH_USERS}${JQ_NODE_PART}${JQ_PROTOCOL_SORT}"
+
+# 由注册表派生排序定义，覆盖上面作为 bash 3 回退保留的静态版本；
+# 新增协议只需改 SUPPORTED_PROTOCOLS/PROTO_PREFIX，排序自动跟随。
+# 注意：这段必须在 JQ_SHARED= 之后，tests/reliability.sh 在 bash 3 下只截取
+# JQ_DETECT_PROTOCOL 到 JQ_SHARED 之间的静态定义，不会执行到这里。
+{
+  _jq_sort_lines=('def protocol_sort_index($tag):')
+  _jq_sort_i=0
+  for _jq_sort_proto in "${SUPPORTED_PROTOCOLS[@]}"; do
+    _jq_sort_prefix="${PROTO_PREFIX[$_jq_sort_proto]}"
+    if [ "$_jq_sort_i" -eq 0 ]; then _jq_sort_kw='if'; else _jq_sort_kw='elif'; fi
+    _jq_sort_lines+=("  ${_jq_sort_kw} (\$tag | startswith(\"${_jq_sort_prefix}-\")) then ${_jq_sort_i}")
+    _jq_sort_i=$((_jq_sort_i + 1))
+  done
+  _jq_sort_lines+=('  else 99' '  end;')
+  JQ_PROTOCOL_SORT="$(printf '%s\n' "${_jq_sort_lines[@]}")"
+  JQ_SHARED="${JQ_DETECT_PROTOCOL}${JQ_AUTH_USERS}${JQ_NODE_PART}${JQ_PROTOCOL_SORT}"
+  unset _jq_sort_lines _jq_sort_i _jq_sort_proto _jq_sort_prefix _jq_sort_kw
+}
 
 # ====================================================
 # 节点排序基础设施 — bash 层面的协议排序
@@ -1323,6 +1346,15 @@ ensure_self_signed_cert() {
   [ -s "$crt_path" ] && [ -s "$key_path" ]
 }
 
+# 自签证书（按 <前缀>-<端口> 命名，如 hy2-443.crt）：设置 _TLS_CRT/_TLS_KEY，失败返回 1。
+# AnyTLS/Trojan/TUIC/Hysteria2 共用同一套逻辑，证书文件一眼能看出属于哪个节点。
+tls_cert_for_prefix() {
+  local prefix="$1" port="$2" sni="$3"
+  _TLS_CRT="/etc/sing-box/${prefix}-${port}.crt"
+  _TLS_KEY="/etc/sing-box/${prefix}-${port}.key"
+  ensure_self_signed_cert "$sni" "$_TLS_CRT" "$_TLS_KEY"
+}
+
 generate_reality_keypair_auto() {
   local out priv pub
   out="$(sing-box generate reality-keypair 2>/dev/null || true)"
@@ -1536,9 +1568,8 @@ build_anytls_inbound() {
   local entry_key crt key
   entry_key="$(entry_key_from_parts anytls "$port")"
   [ -n "$pass" ] || pass="$(random_b64_password 16)"
-  crt="/etc/sing-box/anytls-${port}.crt"
-  key="/etc/sing-box/anytls-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
+  tls_cert_for_prefix "anytls" "$port" "$sni" || return 1
+  crt="$_TLS_CRT"; key="$_TLS_KEY"
   jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"anytls",
@@ -1583,9 +1614,8 @@ build_trojan_inbound() {
   local entry_key crt key
   entry_key="$(entry_key_from_parts trojan "$port")"
   [ -n "$pass" ] || pass="$(random_b64_password 16)"
-  crt="/etc/sing-box/trojan-${port}.crt"
-  key="/etc/sing-box/trojan-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
+  tls_cert_for_prefix "trojan" "$port" "$sni" || return 1
+  crt="$_TLS_CRT"; key="$_TLS_KEY"
   jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"trojan",
@@ -1643,9 +1673,8 @@ build_tuic_inbound() {
   entry_key="$(entry_key_from_parts tuic "$port")"
   uuid="$(sing-box generate uuid)"
   [ -n "$pass" ] || pass="$(random_b64_password 12)"
-  crt="/etc/sing-box/tuic-${port}.crt"
-  key="/etc/sing-box/tuic-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
+  tls_cert_for_prefix "tuic" "$port" "$sni" || return 1
+  crt="$_TLS_CRT"; key="$_TLS_KEY"
   jq -n --arg tag "$entry_key" --arg uuid "$uuid" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"tuic",
@@ -1656,6 +1685,35 @@ build_tuic_inbound() {
       "tls":{"enabled":true,"server_name":$sni,"alpn":["h3"],"certificate_path":$crt,"key_path":$key},
       "congestion_control":"bbr"
     }
+  '
+}
+
+build_hysteria2_inbound() {
+  local port="$1" sni="$2" pass="${3:-}" obfs_type="${4:-}" obfs_pass="${5:-}"
+  local entry_key crt key
+  entry_key="$(entry_key_from_parts hysteria2 "$port")"
+  case "$obfs_type" in
+    ""|salamander|gecko) ;;
+    *) err "不支持的 Hysteria2 混淆类型：$obfs_type（仅支持 salamander/gecko/不启用）。"; return 1 ;;
+  esac
+  [ -n "$pass" ] || pass="$(random_b64_password 16)"
+  if [ -n "$obfs_type" ]; then
+    [ -n "$obfs_pass" ] || obfs_pass="$(random_b64_password 16)"
+  fi
+  tls_cert_for_prefix "hy2" "$port" "$sni" || return 1
+  crt="$_TLS_CRT"; key="$_TLS_KEY"
+  # 带宽不限：不写 up_mbps/down_mbps；不设 gecko min/max 包大小，用 sing-box 默认 512/1200。
+  jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" \
+    --arg obfs_type "$obfs_type" --arg obfs_pass "$obfs_pass" --argjson port "$port" '
+    {
+      "type":"hysteria2",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"name":$tag,"password":$pass}],
+      "tls":{"enabled":true,"server_name":$sni,"alpn":["h3"],"certificate_path":$crt,"key_path":$key}
+    }
+    | if $obfs_type != "" then .obfs = {"type":$obfs_type,"password":$obfs_pass} else . end
   '
 }
 
@@ -1707,7 +1765,7 @@ build_user_object_from_inbound() {
     vmess)
       jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}'
       ;;
-    shadowsocks|anytls|trojan)
+    shadowsocks|anytls|trojan|hysteria2)
       jq -n --arg name "$full_name" --arg pass "$(random_b64_password 16)" '{name:$name,password:$pass}'
       ;;
     tuic)
@@ -1815,6 +1873,147 @@ port_conflict_for_protocol() {
     if config_port_in_use_by_layer "$json" "$port" "$transport" "$exclude_tag"; then return 0; fi
   done
   return 1
+}
+
+# ====================================================
+# Hysteria2 端口跳跃
+# sing-box 只监听一个 UDP 端口；跳跃靠防火墙把一段 UDP 端口重定向到监听端口。
+# 跳跃范围存在 meta.json（config.json 没有这个字段），按 entry_key 记，如 hy2-443。
+# ====================================================
+
+HY2_HOP_DEFAULT_START=30000
+HY2_HOP_DEFAULT_END=40000
+
+hy2_hop_range_valid() {
+  local start="$1" end="$2" listen_port="$3"
+  [[ "$start" =~ ^[0-9]+$ ]] && [[ "$end" =~ ^[0-9]+$ ]] && [[ "$listen_port" =~ ^[0-9]+$ ]] || return 1
+  [ "$start" -ge 1024 ] && [ "$end" -le 65535 ] && [ "$end" -gt "$start" ] || return 1
+  # 范围不能包含监听端口
+  { [ "$listen_port" -lt "$start" ] || [ "$listen_port" -gt "$end" ]; } || return 1
+  return 0
+}
+
+# 解析 "30000-40000" 为 _HOP_START/_HOP_END，格式不对返回 1。
+hy2_parse_hop_range() {
+  local range="${1:-}"
+  [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]] || return 1
+  _HOP_START="${BASH_REMATCH[1]}"
+  _HOP_END="${BASH_REMATCH[2]}"
+}
+
+hy2_hop_range_from_meta() {
+  local meta_json="${1:-}" tag="$2"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq -r --arg t "$tag" '
+    (.[$t].hop_start // null) as $s | (.[$t].hop_end // null) as $e
+    | if ($s != null and $e != null) then "\($s)-\($e)" else "" end'
+}
+
+hy2_hop_range_set_in_meta() {
+  local meta_json="${1:-}" tag="$2" start="$3" end="$4"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq --arg t "$tag" --argjson s "$start" --argjson e "$end" \
+    '.[$t] = ((.[$t] // {}) + {hop_start:$s, hop_end:$e})'
+}
+
+hy2_hop_range_del_from_meta() {
+  local meta_json="${1:-}" tag="$2"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq --arg t "$tag" '
+    del(.[$t].hop_start, .[$t].hop_end)
+    | if (.[$t] // null) == {} then del(.[$t]) else . end'
+}
+
+# 指定的范围是否已被其它 hy2 节点占用（排除自己，用于重装换范围时判断）。
+hy2_hop_range_in_use_by_meta() {
+  local meta_json="${1:-}" start="$2" end="$3" exclude_tag="${4:-}"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq -e --argjson s "$start" --argjson e "$end" --arg ex "$exclude_tag" '
+    [ to_entries[]
+      | select((.key | startswith("hy2-")) and .key != $ex)
+      | (.value.hop_start // null) as $hs | (.value.hop_end // null) as $he
+      | select($hs != null and $he != null)
+      | select(($s <= $he) and ($e >= $hs)) ] | length > 0' >/dev/null 2>&1
+}
+
+hy2_hop_rule_present() {
+  local table_cmd="$1" start="$2" end="$3" port="$4"
+  "$table_cmd" -t nat -C PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null
+}
+
+# 仅在没有 iptables 时的 nft 兜底（有 iptables 的系统走 iptables-nft 即可）。
+hy2_hop_apply_nft() {
+  local start="$1" end="$2" port="$3"
+  if nft list ruleset 2>/dev/null | grep -Fq "udp dport ${start}-${end} redirect to :${port}"; then return 0; fi
+  nft add table ip nat 2>/dev/null || true
+  nft add chain ip nat prerouting '{ type nat hook prerouting priority 0; }' 2>/dev/null || true
+  nft add rule ip nat prerouting udp dport "${start}-${end}" redirect to ":${port}" || return 1
+}
+
+# 持久化重定向规则：只用已装好的工具保存，不自动装包；
+# 保存不了返回 1，由调用方明确提醒用户手动保存，不悄悄跳过。
+hy2_hop_persist() {
+  if has_cmd netfilter-persistent; then
+    netfilter-persistent save >/dev/null 2>&1 && return 0
+  fi
+  if has_cmd iptables-save && [ -d /etc/iptables ]; then
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || return 1
+    if has_cmd ip6tables-save; then ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true; fi
+    return 0
+  fi
+  if [ "$PKG_MANAGER" = "apk" ] && has_cmd iptables-save; then
+    # Alpine OpenRC 的 iptables 服务从 /etc/iptables/rules-save 恢复
+    mkdir -p /etc/iptables 2>/dev/null || return 1
+    iptables-save > /etc/iptables/rules-save 2>/dev/null
+    return $?
+  fi
+  return 1
+}
+
+# 应用端口跳跃重定向（先查后加，重装不重复）。持久化失败只警告，不回滚已生效的规则。
+hy2_hop_apply() {
+  local start="$1" end="$2" port="$3"
+  local applied=0
+  if has_cmd iptables; then
+    if ! hy2_hop_rule_present iptables "$start" "$end" "$port"; then
+      iptables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" || return 1
+    fi
+    applied=1
+  fi
+  if has_cmd ip6tables; then
+    if ! hy2_hop_rule_present ip6tables "$start" "$end" "$port"; then
+      ip6tables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" || return 1
+    fi
+    applied=1
+  fi
+  if [ "$applied" -eq 0 ]; then
+    if has_cmd nft; then
+      hy2_hop_apply_nft "$start" "$end" "$port" || return 1
+    else
+      err "未找到 iptables/ip6tables/nft，无法设置端口跳跃重定向。"
+      return 1
+    fi
+  fi
+  if ! hy2_hop_persist; then
+    warn "端口跳跃规则已生效，但持久化失败：重启后规则会丢失。请手动保存，例如 Debian/Ubuntu：apt install -y iptables-persistent && netfilter-persistent save。"
+  fi
+  return 0
+}
+
+# 删除端口跳跃重定向（规则不存在也不报错）。调用前请先确认没有其它 hy2 节点还在用这个范围。
+hy2_hop_remove() {
+  local start="$1" end="$2" port="$3"
+  if has_cmd iptables; then
+    iptables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null || true
+  fi
+  if has_cmd ip6tables; then
+    ip6tables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null || true
+  fi
+  if ! has_cmd iptables && ! has_cmd ip6tables && has_cmd nft; then
+    warn "本机只有 nft 可用，跳跃规则需手动删除：nft delete rule ip nat prerouting udp dport ${start}-${end} redirect to :${port}（按 handle 删除更稳妥）。"
+  fi
+  hy2_hop_persist || warn "端口跳跃规则已删除，但持久化更新失败，重启后旧规则可能恢复，请手动保存。"
+  return 0
 }
 
 find_inbound_by_entry_key() {
@@ -4991,7 +5190,8 @@ tg_normalize_url() {
 }
 
 tg_api_request() {
-  local token="$1" method="$2" payload="${3:-{}}"
+  local token="$1" method="$2" payload="${3:-}"
+  [ -n "$payload" ] || payload='{}'
   [ -n "$token" ] || return 1
   curl -fsS --connect-timeout 10 --max-time 20 \
     -H "Content-Type: application/json" \
@@ -7876,6 +8076,25 @@ build_v2rayn_tuic_link() {
     "$(url_encode "$name")"
 }
 
+build_v2rayn_hysteria2_link() {
+  local server="$1" port="$2" password="$3" sni="$4" obfs_type="$5" obfs_pass="$6" name="$7"
+  local query="sni=$(url_encode "$sni")"
+  if [ -n "$obfs_type" ]; then
+    query="${query}&obfs=$(url_encode "$obfs_type")&obfs-password=$(url_encode "$obfs_pass")"
+  fi
+  # 认证密码不做 url_encode：与 AnyTLS 链接同理，客户端不对 userinfo 做 URL 解码，
+  # base64 字符集（A-Za-z0-9+/=）在 userinfo 中无歧义，可直接使用。
+  # port 可能是单个端口（443）或跳跃范围（30000-40000），由调用方决定。
+  printf 'hysteria2://%s@%s:%s/?%s#%s' \
+    "$password" "$server" "$port" "$query" "$(url_encode "$name")"
+}
+
+# 从 meta 取某 hy2 节点的跳跃范围 "30000-40000"，没有返回空。
+hy2_export_hop_range() {
+  local tag="$1"
+  hy2_hop_range_from_meta "$(meta_load 2>/dev/null)" "$tag"
+}
+
 # ---------- 导出上下文收集 ----------
 
 export_collect_context() {
@@ -7904,8 +8123,9 @@ export_configs() {
   init_manager_env || { pause; return 0; }
   clear
   local json ctx ip ws_domain vm_domain relay_users_nl
-  local tag proto port sni path sid method server_p
+  local tag proto port sni path sid method server_p obfs_type obfs_pass
   local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
+  local hop_range qx_line clash_line
   json="$(config_load)"
   ctx="$(export_collect_context "$json")"
   IFS=$'\x01' read -r ip ws_domain vm_domain < <(
@@ -7926,12 +8146,12 @@ export_configs() {
   trap '_export_cleanup; trap - RETURN' RETURN
 
   while read -r inbound; do
-    IFS=$'\x01' read -r tag proto port sni path sid method server_p < <(
+    IFS=$'\x01' read -r tag proto port sni path sid method server_p obfs_type obfs_pass < <(
       echo "$inbound" | jq -r "${JQ_DETECT_PROTOCOL}"'
         [(.tag // ""), detect_protocol, ((.listen_port // 0) | tostring),
          (.tls.server_name // "www.icloud.com"), (.transport.path // "/"),
          (.tls.reality.short_id[0] // ""), (.method // "2022-blake3-aes-128-gcm"),
-         (.password // "")] | join("\u0001")
+         (.password // ""), (.obfs.type // ""), (.obfs.password // "")] | join("\u0001")
       '
     )
 
@@ -8034,6 +8254,42 @@ export_configs() {
             echo -e " Quantumult X: vless=$ip:443,method=none,password=${uuid},obfs=wss,obfs-host=${ws_domain},obfs-uri=${path}?ed=2048,fast-open=false,udp-relay=true,tag=${out_name}"
             echo ""
             v2rayn_link="$(build_v2rayn_vless_ws_link "$ip" "$uuid" "$ws_domain" "${path}?ed=2048" "$out_name")"
+            echo -e " 通用链接: ${v2rayn_link}"
+          } >> "$target_file"
+          ;;
+        hysteria2)
+          [ -z "$pass" ] && continue
+          hop_range="$(hy2_export_hop_range "$tag")"
+          {
+            echo -e "\n${W}[${out_name}]${NC}"
+            clash_line=" Clash: - {name: ${out_name}, type: hysteria2, server: $ip, port: $port, password: $pass, sni: $sni, skip-cert-verify: true"
+            if [ -n "$obfs_type" ]; then
+              clash_line="${clash_line}, obfs: ${obfs_type}, obfs-password: ${obfs_pass}"
+            fi
+            if [ -n "$hop_range" ]; then
+              clash_line="${clash_line}, ports: \"${hop_range}\", hop-interval: 30"
+            fi
+            clash_line="${clash_line}}"
+            echo -e "$clash_line"
+            echo ""
+            # QX：基础端口就是监听端口，跳跃范围单独用 port-hopping 写
+            qx_line=" Quantumult X: hysteria2=${ip}:${port}, password=${pass}, tls-host=${sni}, tls-verification=false, udp-relay=true"
+            if [ -n "$hop_range" ]; then
+              qx_line="${qx_line}, port-hopping=${hop_range}"
+            fi
+            if [ "$obfs_type" = "gecko" ]; then
+              qx_line="${qx_line}, gecko-password=${obfs_pass}"
+            elif [ "$obfs_type" = "salamander" ]; then
+              qx_line="${qx_line}, salamander-password=${obfs_pass}"
+            fi
+            qx_line="${qx_line}, tag=${out_name}"
+            echo -e "$qx_line"
+            echo ""
+            if [ -n "$hop_range" ]; then
+              v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$hop_range" "$pass" "$sni" "$obfs_type" "$obfs_pass" "$out_name")"
+            else
+              v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$port" "$pass" "$sni" "$obfs_type" "$obfs_pass" "$out_name")"
+            fi
             echo -e " 通用链接: ${v2rayn_link}"
           } >> "$target_file"
           ;;
@@ -9360,45 +9616,103 @@ prompt_ss2022_password_or_return() {
   return 0
 }
 
+# ---------- 安装菜单通用助手 ----------
+# protocol_install_menu 的工作状态放在以下全局变量里，助手函数直接读写它们，
+# 避免用命令替换调用导致子 shell 丢状态。每次进入安装菜单时重新初始化。
+#   _INSTALL_JSON        当前待提交的配置 JSON
+#   _INSTALL_ADDED_KEYS  本次新增的节点 key（数组）
+#   _INSTALL_PORT        install_pick_port 选出的端口
+#   _INSTALL_ENTRY_KEY   install_pick_port 算出的节点 key
+
+# 选端口并做冲突检查：成功设置 _INSTALL_PORT/_INSTALL_ENTRY_KEY，返回 0；
+# 用户中途返回返回 1。调用方用 || { warn ...; pause; return 0; } 处理。
+install_pick_port() {
+  local proto="$1" prompt="$2" default="$3" conflict_desc="${4:-已被占用}"
+  local port entry_key
+  ask_port_or_return "$prompt" "$default" port || return 1
+  entry_key="$(entry_key_from_parts "$proto" "$port")" || return 1
+  while port_conflict_for_protocol "$_INSTALL_JSON" "$proto" "$port" "$entry_key"; do
+    warn "端口 ${port} ${conflict_desc}，请更换。"
+    ask_port_or_return "$prompt" "$default" port || return 1
+    entry_key="$(entry_key_from_parts "$proto" "$port")" || return 1
+  done
+  _INSTALL_PORT="$port"
+  _INSTALL_ENTRY_KEY="$entry_key"
+}
+
+# 把一个已生成的 inbound 写入 _INSTALL_JSON（同 tag 覆盖），并记入新增节点。
+install_append_inbound() {
+  local entry_key="$1" inbound="$2"
+  _INSTALL_JSON="$(echo "$_INSTALL_JSON" | jq --arg ek "$entry_key" --argjson inb "$inbound" \
+    '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
+  _INSTALL_ADDED_KEYS+=("$entry_key")
+}
+
+# 按 meta 快照清理一批已删除的 hy2 节点的跳跃规则与记录（卸载/清空配置共用）。
+# 参数：meta JSON，之后是 entry_key 列表。只删没有其它节点在用的范围。
+# 回显更新后的 meta JSON；调用方在有变化时 meta_save。
+hy2_hop_cleanup_removed() {
+  local meta_json="${1:-}"; shift
+  [ -n "$meta_json" ] || meta_json='{}'
+  local _meta_out="$meta_json" _tag _range _port _after
+  for _tag in "$@"; do
+    _range="$(hy2_hop_range_from_meta "$_meta_out" "$_tag")"
+    [ -n "$_range" ] || continue
+    hy2_parse_hop_range "$_range" || continue
+    _port="$(entry_key_to_port "$_tag")"
+    _after="$(hy2_hop_range_del_from_meta "$_meta_out" "$_tag")"
+    if hy2_hop_range_in_use_by_meta "$_after" "$_HOP_START" "$_HOP_END" "$_tag"; then
+      _meta_out="$_after"
+      continue
+    fi
+    hy2_hop_remove "$_HOP_START" "$_HOP_END" "$_port"
+    _meta_out="$_after"
+  done
+  echo "$_meta_out"
+}
+
 protocol_install_menu() {
   local json="$1"
-  local updated_json="$json"
   local choice_arr sel
   local -a added_node_keys=()
   local -a reality_meta_tags=()
   local -a reality_meta_pubs=()
+  local -a hy2_meta_tags=()
+  local -a hy2_meta_ranges=()
+  local -a hy2_old_ranges=()
+  local i=1 proto
   echo -e "\n${C}可安装协议（多个用 + 连接，如 1+3+5）:${NC}"
-  echo -e "  [1] vless-reality"
-  echo -e "  [2] anytls"
-  echo -e "  [3] shadowsocks"
-  echo -e "  [4] socks"
-  echo -e "  [5] trojan"
-  echo -e "  [6] vmess-ws"
-  echo -e "  [7] vless-ws"
-  echo -e "  [8] tuic"
+  for proto in "${SUPPORTED_PROTOCOLS[@]}"; do
+    echo -e "  [$i] $proto"
+    i=$((i+1))
+  done
   read -r -p "请输入要安装的协议编号（回车返回）: " sel
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
   [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议，已返回上一级。"; pause; return 0; }
 
   local c port listen sni path priv sid entry_key inbound pub generated_pair uuid pass method server_pass user_pass username
+  local obfs_type obfs_pass obfs_choice hop_answer hop_range hop_enabled hop_start hop_end
   for c in "${choice_arr[@]}"; do
-    if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt 8 ]; then
+    if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt "${#SUPPORTED_PROTOCOLS[@]}" ]; then
       warn "无效协议编号：$c，已返回上一级。"
       pause
       return 0
     fi
   done
 
+  _INSTALL_JSON="$json"
+  _INSTALL_ADDED_KEYS=()
+  # Hysteria2 跳跃范围的旧值快照（用于重装换范围、关闭跳跃时清理旧规则）
+  local _meta_snapshot
+  _meta_snapshot="$(meta_load 2>/dev/null)" || _meta_snapshot='{}'
+  [ -n "$_meta_snapshot" ] || _meta_snapshot='{}'
+
   for c in "${choice_arr[@]}"; do
-    case "$c" in
-      1)
-        ask_port_or_return "Reality 监听端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts vless-reality "$port")"
-        while port_conflict_for_protocol "$updated_json" vless-reality "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "Reality 监听端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts vless-reality "$port")"
-        done
+    proto="${SUPPORTED_PROTOCOLS[$((c-1))]}"
+    case "$proto" in
+      vless-reality)
+        install_pick_port vless-reality "Reality 监听端口 (默认: 443): " "443" || { warn "已返回上一级。"; pause; return 0; }
+        port="$_INSTALL_PORT"; entry_key="$_INSTALL_ENTRY_KEY"
         read -r -p "Private Key（回车自动生成）: " priv
         pub=""
         if [ -z "$priv" ]; then
@@ -9430,21 +9744,15 @@ protocol_install_menu() {
         inbound="$(build_vless_reality_inbound "$port" "$sni" "$priv" "$sid")"
         uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
         param_echo "UUID" "$uuid"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
-        added_node_keys+=("$entry_key")
+        install_append_inbound "$entry_key" "$inbound"
         if [ -n "$pub" ]; then
           reality_meta_tags+=("$entry_key")
           reality_meta_pubs+=("$pub")
         fi
         ;;
-      2)
-        ask_port_or_return "AnyTLS 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts anytls "$port")"
-        while port_conflict_for_protocol "$updated_json" anytls "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "AnyTLS 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts anytls "$port")"
-        done
+      anytls)
+        install_pick_port anytls "AnyTLS 端口 (默认: 443): " "443" || { warn "已返回上一级。"; pause; return 0; }
+        port="$_INSTALL_PORT"; entry_key="$_INSTALL_ENTRY_KEY"
         sni="$(choose_tls_domain "AnyTLS")" || return 0
         prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
         if ! inbound="$(build_anytls_inbound "$port" "$sni" "$pass")"; then
@@ -9454,17 +9762,72 @@ protocol_install_menu() {
         fi
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "Password" "$pass"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
-        added_node_keys+=("$entry_key")
+        install_append_inbound "$entry_key" "$inbound"
         ;;
-      3)
-        ask_port_or_return "Shadowsocks 监听端口 (默认: 8080): " "8080" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts shadowsocks "$port")"
-        while port_conflict_for_protocol "$updated_json" shadowsocks "$port" "$entry_key"; do
-          warn "端口 ${port} 已被同层协议占用，请更换。"
-          ask_port_or_return "Shadowsocks 监听端口 (默认: 8080): " "8080" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts shadowsocks "$port")"
-        done
+      hysteria2)
+        install_pick_port hysteria2 "Hysteria2 端口（默认443，可与TCP协议的443端口并存）: " "443" "已被其它 Hysteria2 占用" || { warn "已返回上一级。"; pause; return 0; }
+        port="$_INSTALL_PORT"; entry_key="$_INSTALL_ENTRY_KEY"
+        sni="$(choose_tls_domain "Hysteria2")" || return 0
+        prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
+        # 混淆：默认 gecko，可切 salamander 或不启用；混淆密码与认证密码分开两个。
+        read -r -p "混淆类型（1=gecko 默认，2=salamander，3=不启用，回车默认1）: " obfs_choice
+        case "${obfs_choice:-1}" in
+          2) obfs_type="salamander" ;;
+          3) obfs_type="" ;;
+          *) obfs_type="gecko" ;;
+        esac
+        obfs_pass=""
+        if [ -n "$obfs_type" ]; then
+          prompt_password_or_return "混淆密码（回车随机生成）: " obfs_pass || { pause; return 0; }
+          [ -n "$obfs_pass" ] || obfs_pass="$(random_b64_password 16)"
+          param_echo "混淆类型" "$obfs_type"
+          param_echo "混淆密码" "$obfs_pass"
+        fi
+        # 端口跳跃：默认开，范围默认 30000-40000；sing-box 只监听 UDP 443，跳跃靠防火墙重定向。
+        hop_enabled=1
+        hop_start="$HY2_HOP_DEFAULT_START"; hop_end="$HY2_HOP_DEFAULT_END"
+        read -r -p "启用端口跳跃（默认开，范围 ${hop_start}-${hop_end}，输入 n 关闭，回车默认开）: " hop_answer
+        if [[ "${hop_answer:-}" =~ ^[Nn]$ ]]; then
+          hop_enabled=0
+        else
+          while true; do
+            read -r -p "端口跳跃范围 (默认: ${hop_start}-${hop_end}，回车用默认): " hop_range
+            hop_range="${hop_range:-${hop_start}-${hop_end}}"
+            if ! hy2_parse_hop_range "$hop_range"; then
+              warn "范围格式不对，应为 起始-结束，如 30000-40000。"
+              continue
+            fi
+            hop_start="$_HOP_START"; hop_end="$_HOP_END"
+            if ! hy2_hop_range_valid "$hop_start" "$hop_end" "$port"; then
+              warn "范围无效：起始 ≥1024、结束 ≤65535、结束大于起始，且不能包含监听端口 ${port}。"
+              continue
+            fi
+            if hy2_hop_range_in_use_by_meta "$_meta_snapshot" "$hop_start" "$hop_end" "$entry_key"; then
+              warn "范围 ${hop_start}-${hop_end} 已被其它 Hysteria2 节点占用，请换一个范围。"
+              continue
+            fi
+            break
+          done
+        fi
+        if ! inbound="$(build_hysteria2_inbound "$port" "$sni" "$pass" "$obfs_type" "$obfs_pass")"; then
+          err "生成 Hysteria2 配置失败：证书文件未能生成，已返回上一级。"
+          pause
+          return 0
+        fi
+        pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
+        param_echo "Password" "$pass"
+        install_append_inbound "$entry_key" "$inbound"
+        hy2_meta_tags+=("$entry_key")
+        if [ "$hop_enabled" -eq 1 ]; then
+          hy2_meta_ranges+=("${hop_start}-${hop_end}")
+        else
+          hy2_meta_ranges+=("")
+        fi
+        hy2_old_ranges+=("$(hy2_hop_range_from_meta "$_meta_snapshot" "$entry_key")")
+        ;;
+      shadowsocks)
+        install_pick_port shadowsocks "Shadowsocks 监听端口 (默认: 8080): " "8080" "已被同层协议占用" || { warn "已返回上一级。"; pause; return 0; }
+        port="$_INSTALL_PORT"; entry_key="$_INSTALL_ENTRY_KEY"
         prompt_ss2022_password_or_return pass || { pause; return 0; }
         if ! inbound="$(build_ss_inbound "$port" "$pass")"; then
           err "生成 Shadowsocks 配置失败，已返回上一级。"
@@ -9481,17 +9844,11 @@ protocol_install_menu() {
         fi
         param_echo "Method" "$method"
         param_echo "Password" "$pass"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
-        added_node_keys+=("$entry_key")
+        install_append_inbound "$entry_key" "$inbound"
         ;;
-      4)
-        ask_port_or_return "SOCKS 监听端口 (默认: 1080): " "1080" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts socks "$port")"
-        while port_conflict_for_protocol "$updated_json" socks "$port" "$entry_key"; do
-          warn "端口 ${port} 已被同层协议占用，请更换。"
-          ask_port_or_return "SOCKS 监听端口 (默认: 1080): " "1080" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts socks "$port")"
-        done
+      socks)
+        install_pick_port socks "SOCKS 监听端口 (默认: 1080): " "1080" "已被同层协议占用" || { warn "已返回上一级。"; pause; return 0; }
+        port="$_INSTALL_PORT"; entry_key="$_INSTALL_ENTRY_KEY"
         prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
         [ -n "$pass" ] || pass="$(random_b64_password 12)"
         if ! inbound="$(build_socks_inbound "$port" "$pass")"; then
@@ -9503,17 +9860,11 @@ protocol_install_menu() {
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "Username" "$username"
         param_echo "Password" "$pass"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
-        added_node_keys+=("$entry_key")
+        install_append_inbound "$entry_key" "$inbound"
         ;;
-      5)
-        ask_port_or_return "Trojan 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts trojan "$port")"
-        while port_conflict_for_protocol "$updated_json" trojan "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "Trojan 端口 (默认: 443): " "443" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts trojan "$port")"
-        done
+      trojan)
+        install_pick_port trojan "Trojan 端口 (默认: 443): " "443" || { warn "已返回上一级。"; pause; return 0; }
+        port="$_INSTALL_PORT"; entry_key="$_INSTALL_ENTRY_KEY"
         sni="$(choose_tls_domain "Trojan")" || return 0
         prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
         if ! inbound="$(build_trojan_inbound "$port" "$sni" "$pass")"; then
@@ -9523,51 +9874,33 @@ protocol_install_menu() {
         fi
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "Password" "$pass"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
-        added_node_keys+=("$entry_key")
+        install_append_inbound "$entry_key" "$inbound"
         ;;
-      6)
+      vmess-ws)
         read -r -p "vmess-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
-        ask_port_or_return "vmess-ws 监听端口 (默认: 8001): " "8001" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts vmess-ws "$port")"
-        while port_conflict_for_protocol "$updated_json" vmess-ws "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "vmess-ws 监听端口 (默认: 8001): " "8001" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts vmess-ws "$port")"
-        done
+        install_pick_port vmess-ws "vmess-ws 监听端口 (默认: 8001): " "8001" || { warn "已返回上一级。"; pause; return 0; }
+        port="$_INSTALL_PORT"; entry_key="$_INSTALL_ENTRY_KEY"
         read -r -p "WS Path (回车随机生成): " path; path="$(normalize_ws_path "${path:-}")"
         param_echo "WS Path" "$path"
         inbound="$(build_vmess_ws_inbound "$port" "$listen" "$path")"
         uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
         param_echo "UUID" "$uuid"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
-        added_node_keys+=("$entry_key")
+        install_append_inbound "$entry_key" "$inbound"
         ;;
-      7)
+      vless-ws)
         read -r -p "vless-ws 监听地址 (默认: 127.0.0.1): " listen; listen="${listen:-127.0.0.1}"
-        ask_port_or_return "vless-ws 监听端口 (默认: 8002): " "8002" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts vless-ws "$port")"
-        while port_conflict_for_protocol "$updated_json" vless-ws "$port" "$entry_key"; do
-          warn "端口 ${port} 已被占用，请更换。"
-          ask_port_or_return "vless-ws 监听端口 (默认: 8002): " "8002" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts vless-ws "$port")"
-        done
+        install_pick_port vless-ws "vless-ws 监听端口 (默认: 8002): " "8002" || { warn "已返回上一级。"; pause; return 0; }
+        port="$_INSTALL_PORT"; entry_key="$_INSTALL_ENTRY_KEY"
         read -r -p "WS Path (回车随机生成): " path; path="$(normalize_ws_path "${path:-}")"
         param_echo "WS Path" "$path"
         inbound="$(build_vless_ws_inbound "$port" "$listen" "$path")"
         uuid="$(echo "$inbound" | jq -r '.users[0].uuid // empty')"
         param_echo "UUID" "$uuid"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
-        added_node_keys+=("$entry_key")
+        install_append_inbound "$entry_key" "$inbound"
         ;;
-      8)
-        ask_port_or_return "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" port || { warn "已返回上一级。"; pause; return 0; }
-        entry_key="$(entry_key_from_parts tuic "$port")"
-        while port_conflict_for_protocol "$updated_json" tuic "$port" "$entry_key"; do
-          warn "端口 ${port} 已被其它 TUIC 占用，请更换。"
-          ask_port_or_return "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" port || { warn "已返回上一级。"; pause; return 0; }
-          entry_key="$(entry_key_from_parts tuic "$port")"
-        done
+      tuic)
+        install_pick_port tuic "TUIC 端口（默认443，可与TCP协议的443端口并存）: " "443" "已被其它 TUIC 占用" || { warn "已返回上一级。"; pause; return 0; }
+        port="$_INSTALL_PORT"; entry_key="$_INSTALL_ENTRY_KEY"
         sni="$(choose_tls_domain "TUIC")" || return 0
         prompt_password_or_return "Password（回车随机生成）: " pass || { pause; return 0; }
         if ! inbound="$(build_tuic_inbound "$port" "$sni" "$pass")"; then
@@ -9579,14 +9912,15 @@ protocol_install_menu() {
         pass="$(echo "$inbound" | jq -r '.users[0].password // empty')"
         param_echo "UUID" "$uuid"
         param_echo "Password" "$pass"
-        updated_json="$(echo "$updated_json" | jq --arg ek "$entry_key" --argjson inb "$inbound" '.inbounds |= map(select(.tag != $ek)) | .inbounds += [$inb]')"
-        added_node_keys+=("$entry_key")
+        install_append_inbound "$entry_key" "$inbound"
         ;;
     esac
   done
 
+  updated_json="$_INSTALL_JSON"
+  added_node_keys=("${_INSTALL_ADDED_KEYS[@]}")
   updated_json="$(route_rebuild "$updated_json")"
-  # 构造候选 meta：把所有 reality 公钥写进去，与 config 一起原子提交
+  # 构造候选 meta：把所有 reality 公钥和 Hysteria2 跳跃范围写进去，与 config 一起原子提交
   local candidate_meta i
   candidate_meta="$(meta_load 2>/dev/null)" || candidate_meta='{}'
   [ -n "$candidate_meta" ] || candidate_meta='{}'
@@ -9598,6 +9932,26 @@ protocol_install_menu() {
       pause
       return 1
     }
+  done
+  for i in "${!hy2_meta_tags[@]}"; do
+    if [ -n "${hy2_meta_ranges[$i]}" ]; then
+      hy2_parse_hop_range "${hy2_meta_ranges[$i]}" || {
+        err "构造 Hysteria2 跳跃 meta 失败：范围格式无效。"
+        pause
+        return 1
+      }
+      candidate_meta="$(hy2_hop_range_set_in_meta "$candidate_meta" "${hy2_meta_tags[$i]}" "$_HOP_START" "$_HOP_END")" || {
+        err "构造 Hysteria2 跳跃 meta 失败。"
+        pause
+        return 1
+      }
+    else
+      candidate_meta="$(hy2_hop_range_del_from_meta "$candidate_meta" "${hy2_meta_tags[$i]}")" || {
+        err "构造 Hysteria2 跳跃 meta 失败。"
+        pause
+        return 1
+      }
+    fi
   done
   local _install_ok=0
   if user_db_exists; then
@@ -9621,6 +9975,44 @@ protocol_install_menu() {
   fi
   if [ "$_install_ok" -eq 1 ]; then
     ok "协议已安装/更新。"
+    # Hysteria2 端口跳跃同步：配置已成功应用后才动防火墙
+    local _hy2_i _hy2_tag _hy2_new _hy2_old _hy2_port _hy2_meta_now
+    for _hy2_i in "${!hy2_meta_tags[@]}"; do
+      _hy2_tag="${hy2_meta_tags[$_hy2_i]}"
+      _hy2_new="${hy2_meta_ranges[$_hy2_i]}"
+      _hy2_old="${hy2_old_ranges[$_hy2_i]}"
+      _hy2_port="$(entry_key_to_port "$_hy2_tag")"
+      if [ -n "$_hy2_new" ]; then
+        hy2_parse_hop_range "$_hy2_new" || continue
+        if hy2_hop_apply "$_HOP_START" "$_HOP_END" "$_hy2_port"; then
+          ok "端口跳跃已启用：UDP ${_HOP_START}-${_HOP_END} -> ${_hy2_port}（${_hy2_tag}）。"
+          say "云安全组还需放行 UDP ${_HOP_START}-${_HOP_END} 和 UDP ${_hy2_port}，脚本无法代劳。"
+        else
+          warn "端口跳跃重定向设置失败（${_hy2_tag}）：配置已保存但跳跃未生效，已清理该节点的跳跃记录，可手动执行 iptables 重定向后重新安装。"
+          _hy2_meta_now="$(meta_load 2>/dev/null)" || _hy2_meta_now='{}'
+          _hy2_meta_now="$(hy2_hop_range_del_from_meta "$_hy2_meta_now" "$_hy2_tag")" \
+            && meta_save "$_hy2_meta_now" || warn "跳跃记录清理失败，请手动检查 meta.json。"
+          continue
+        fi
+        # 换范围：旧范围没有其它节点用就删掉
+        if [ -n "$_hy2_old" ] && [ "$_hy2_old" != "$_hy2_new" ]; then
+          hy2_parse_hop_range "$_hy2_old" || continue
+          _hy2_meta_now="$(meta_load 2>/dev/null)" || _hy2_meta_now='{}'
+          if ! hy2_hop_range_in_use_by_meta "$_hy2_meta_now" "$_HOP_START" "$_HOP_END" "$_hy2_tag"; then
+            hy2_hop_remove "$_HOP_START" "$_HOP_END" "$_hy2_port"
+          fi
+        fi
+      else
+        # 本次关闭跳跃：旧范围没有其它节点用就删掉
+        if [ -n "$_hy2_old" ]; then
+          hy2_parse_hop_range "$_hy2_old" || continue
+          _hy2_meta_now="$(meta_load 2>/dev/null)" || _hy2_meta_now='{}'
+          if ! hy2_hop_range_in_use_by_meta "$_hy2_meta_now" "$_HOP_START" "$_HOP_END" "$_hy2_tag"; then
+            hy2_hop_remove "$_HOP_START" "$_HOP_END" "$_hy2_port"
+          fi
+        fi
+      fi
+    done
   fi
   pause
   return 0
@@ -9630,7 +10022,12 @@ protocol_install_menu() {
 
 protocol_remove_menu() {
   local json="$1"
-  local lines=() choice_arr updated_json="$json" c entry_key related sel
+  local lines=() choice_arr updated_json="$json" c entry_key related sel _rtype
+  # 卸载前快照 Hysteria2 跳跃范围（meta 中），成功后按此清理防火墙规则
+  local _remove_meta
+  _remove_meta="$(meta_load 2>/dev/null)" || _remove_meta='{}'
+  [ -n "$_remove_meta" ] || _remove_meta='{}'
+  local -a _removed_hy2_keys=()
   mapfile -t lines < <(protocol_entry_table "$json")
   if [ ${#lines[@]} -eq 0 ]; then
     warn "当前没有可卸载的协议。"
@@ -9658,7 +10055,8 @@ protocol_remove_menu() {
 
   local _cert_files_to_clean=()
   for c in "${choice_arr[@]}"; do
-    IFS=$'\x01' read -r entry_key _ <<< "${lines[$((c-1))]}"
+    IFS=$'\x01' read -r entry_key _rtype _ <<< "${lines[$((c-1))]}"
+    if [ "$_rtype" = "hysteria2" ]; then _removed_hy2_keys+=("$entry_key"); fi
     related="$(relay_list_table "$updated_json" | awk -F '\x01' -v ek="$entry_key" '{u=$2; sub(/@.*/, "", u)} $1 == ek {print u}' | awk 'NF' | sort -u)" || {
       err "读取关联中转失败，已中止卸载。"
       pause
@@ -9711,6 +10109,14 @@ protocol_remove_menu() {
     for _f in "${_cert_files_to_clean[@]}"; do
       rm -f "$_f" >/dev/null 2>&1 || true
     done
+  fi
+  # 卸载成功的 hy2 节点：没有其它节点在用的跳跃范围就删规则、清记录
+  if [ "$_apply_ok" -eq 1 ] && [ ${#_removed_hy2_keys[@]} -gt 0 ]; then
+    local _hop_meta_new
+    _hop_meta_new="$(hy2_hop_cleanup_removed "$_remove_meta" "${_removed_hy2_keys[@]}")"
+    if [ "$_hop_meta_new" != "$_remove_meta" ]; then
+      meta_save "$_hop_meta_new" || warn "Hysteria2 跳跃记录清理失败，请手动检查 meta.json。"
+    fi
   fi
   [ "$_apply_ok" -eq 1 ] && ok "协议已卸载。"
   pause
@@ -9779,6 +10185,17 @@ clear_config_json() {
   [ -n "$empty_meta" ] || empty_meta='{}'
   if config_and_meta_apply "$empty_config" "$empty_meta"; then
     ok "配置已清空，分流状态已重置。"
+    # 清空配置会删掉所有 hy2 入站，顺带清理其跳跃规则，避免残留重定向
+    local _clear_meta _clear_new_meta
+    local -a _clear_keys=()
+    _clear_meta="$(meta_load 2>/dev/null)" || _clear_meta='{}'
+    mapfile -t _clear_keys < <(echo "$_clear_meta" | jq -r 'to_entries[] | select(.key | startswith("hy2-")) | select(.value.hop_start != null) | .key')
+    if [ ${#_clear_keys[@]} -gt 0 ]; then
+      _clear_new_meta="$(hy2_hop_cleanup_removed "$_clear_meta" "${_clear_keys[@]}")"
+      if [ "$_clear_new_meta" != "$_clear_meta" ]; then
+        meta_save "$_clear_new_meta" || warn "Hysteria2 跳跃记录清理失败，请手动检查 meta.json。"
+      fi
+    fi
   else
     err "配置或分流状态清空失败。"
   fi
