@@ -48,6 +48,15 @@ ensure_self_signed_cert() {
   [ -s "$crt_path" ] && [ -s "$key_path" ]
 }
 
+# 自签证书（按 <前缀>-<端口> 命名，如 hy2-443.crt）：设置 _TLS_CRT/_TLS_KEY，失败返回 1。
+# AnyTLS/Trojan/TUIC/Hysteria2 共用同一套逻辑，证书文件一眼能看出属于哪个节点。
+tls_cert_for_prefix() {
+  local prefix="$1" port="$2" sni="$3"
+  _TLS_CRT="/etc/sing-box/${prefix}-${port}.crt"
+  _TLS_KEY="/etc/sing-box/${prefix}-${port}.key"
+  ensure_self_signed_cert "$sni" "$_TLS_CRT" "$_TLS_KEY"
+}
+
 generate_reality_keypair_auto() {
   local out priv pub
   out="$(sing-box generate reality-keypair 2>/dev/null || true)"
@@ -261,9 +270,8 @@ build_anytls_inbound() {
   local entry_key crt key
   entry_key="$(entry_key_from_parts anytls "$port")"
   [ -n "$pass" ] || pass="$(random_b64_password 16)"
-  crt="/etc/sing-box/anytls-${port}.crt"
-  key="/etc/sing-box/anytls-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
+  tls_cert_for_prefix "anytls" "$port" "$sni" || return 1
+  crt="$_TLS_CRT"; key="$_TLS_KEY"
   jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"anytls",
@@ -308,9 +316,8 @@ build_trojan_inbound() {
   local entry_key crt key
   entry_key="$(entry_key_from_parts trojan "$port")"
   [ -n "$pass" ] || pass="$(random_b64_password 16)"
-  crt="/etc/sing-box/trojan-${port}.crt"
-  key="/etc/sing-box/trojan-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
+  tls_cert_for_prefix "trojan" "$port" "$sni" || return 1
+  crt="$_TLS_CRT"; key="$_TLS_KEY"
   jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"trojan",
@@ -368,9 +375,8 @@ build_tuic_inbound() {
   entry_key="$(entry_key_from_parts tuic "$port")"
   uuid="$(sing-box generate uuid)"
   [ -n "$pass" ] || pass="$(random_b64_password 12)"
-  crt="/etc/sing-box/tuic-${port}.crt"
-  key="/etc/sing-box/tuic-${port}.key"
-  ensure_self_signed_cert "$sni" "$crt" "$key" || return 1
+  tls_cert_for_prefix "tuic" "$port" "$sni" || return 1
+  crt="$_TLS_CRT"; key="$_TLS_KEY"
   jq -n --arg tag "$entry_key" --arg uuid "$uuid" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" --argjson port "$port" '
     {
       "type":"tuic",
@@ -381,6 +387,38 @@ build_tuic_inbound() {
       "tls":{"enabled":true,"server_name":$sni,"alpn":["h3"],"certificate_path":$crt,"key_path":$key},
       "congestion_control":"bbr"
     }
+  '
+}
+
+build_hysteria2_inbound() {
+  local port="$1" sni="$2" pass="${3:-}" obfs_type="${4:-}" obfs_pass="${5:-}"
+  local entry_key crt key
+  entry_key="$(entry_key_from_parts hysteria2 "$port")"
+  case "$obfs_type" in
+    ""|salamander|gecko) ;;
+    *) err "不支持的 Hysteria2 混淆类型：$obfs_type（仅支持 salamander/gecko/不启用）。"; return 1 ;;
+  esac
+  [ -n "$pass" ] || pass="$(random_b64_password 16)"
+  if [ -n "$obfs_type" ]; then
+    [ -n "$obfs_pass" ] || obfs_pass="$(random_b64_password 16)"
+  fi
+  tls_cert_for_prefix "hy2" "$port" "$sni" || return 1
+  crt="$_TLS_CRT"; key="$_TLS_KEY"
+  # 带宽不限：不写 up_mbps/down_mbps；不设 gecko min/max 包大小，用 sing-box 默认 512/1200。
+  # 忽略客户端上报带宽、双端强制走 BBR：不写 up/down 时 ignore_client_bandwidth=true 才会生效，
+  # 客户端报多少都不切 Brutal；若以后填了 up/down，二者会冲突，届时须去掉这一行。
+  jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" \
+    --arg obfs_type "$obfs_type" --arg obfs_pass "$obfs_pass" --argjson port "$port" '
+    {
+      "type":"hysteria2",
+      "tag":$tag,
+      "listen":"::",
+      "listen_port":$port,
+      "users":[{"name":$tag,"password":$pass}],
+      "ignore_client_bandwidth":true,
+      "tls":{"enabled":true,"server_name":$sni,"alpn":["h3"],"certificate_path":$crt,"key_path":$key}
+    }
+    | if $obfs_type != "" then .obfs = {"type":$obfs_type,"password":$obfs_pass} else . end
   '
 }
 
@@ -432,7 +470,7 @@ build_user_object_from_inbound() {
     vmess)
       jq -n --arg name "$full_name" --arg uuid "$(sing-box generate uuid)" '{name:$name,uuid:$uuid,alterId:0}'
       ;;
-    shadowsocks|anytls|trojan)
+    shadowsocks|anytls|trojan|hysteria2)
       jq -n --arg name "$full_name" --arg pass "$(random_b64_password 16)" '{name:$name,password:$pass}'
       ;;
     tuic)

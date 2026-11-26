@@ -86,6 +86,313 @@ port_conflict_for_protocol() {
   return 1
 }
 
+# ====================================================
+# Hysteria2 端口跳跃
+# sing-box 只监听一个 UDP 端口；跳跃靠防火墙把一段 UDP 端口重定向到监听端口。
+# 跳跃范围存在 meta.json（config.json 没有这个字段），按 entry_key 记，如 hy2-443。
+# ====================================================
+
+HY2_HOP_DEFAULT_START=42310
+HY2_HOP_DEFAULT_END=45545
+
+hy2_hop_range_valid() {
+  local start="$1" end="$2" listen_port="$3"
+  [[ "$start" =~ ^[0-9]+$ ]] && [[ "$end" =~ ^[0-9]+$ ]] && [[ "$listen_port" =~ ^[0-9]+$ ]] || return 1
+  [ "$start" -ge 1024 ] && [ "$end" -le 65535 ] && [ "$end" -gt "$start" ] || return 1
+  # 范围不能包含监听端口
+  { [ "$listen_port" -lt "$start" ] || [ "$listen_port" -gt "$end" ]; } || return 1
+  return 0
+}
+
+# 解析 "42310-45545" 为 _HOP_START/_HOP_END，格式不对返回 1。
+hy2_parse_hop_range() {
+  local range="${1:-}"
+  [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]] || return 1
+  _HOP_START="${BASH_REMATCH[1]}"
+  _HOP_END="${BASH_REMATCH[2]}"
+}
+
+hy2_hop_range_from_meta() {
+  local meta_json="${1:-}" tag="$2"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq -r --arg t "$tag" '
+    (.[$t].hop_start // null) as $s | (.[$t].hop_end // null) as $e
+    | if ($s != null and $e != null) then "\($s)-\($e)" else "" end'
+}
+
+hy2_hop_range_set_in_meta() {
+  local meta_json="${1:-}" tag="$2" start="$3" end="$4"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq --arg t "$tag" --argjson s "$start" --argjson e "$end" \
+    '.[$t] = ((.[$t] // {}) + {hop_start:$s, hop_end:$e})'
+}
+
+hy2_hop_range_del_from_meta() {
+  local meta_json="${1:-}" tag="$2"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq --arg t "$tag" '
+    del(.[$t].hop_start, .[$t].hop_end)
+    | if (.[$t] // null) == {} then del(.[$t]) else . end'
+}
+
+# 指定的范围是否已被其它 hy2 节点占用（排除自己，用于重装换范围时判断）。
+hy2_hop_range_in_use_by_meta() {
+  local meta_json="${1:-}" start="$2" end="$3" exclude_tag="${4:-}"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq -e --argjson s "$start" --argjson e "$end" --arg ex "$exclude_tag" '
+    [ to_entries[]
+      | select((.key | startswith("hy2-")) and .key != $ex)
+      | (.value.hop_start // null) as $hs | (.value.hop_end // null) as $he
+      | select($hs != null and $he != null)
+      | select(($s <= $he) and ($e >= $hs)) ] | length > 0' >/dev/null 2>&1
+}
+
+hy2_hop_rule_present() {
+  local table_cmd="$1" start="$2" end="$3" port="$4"
+  "$table_cmd" -t nat -C PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null
+}
+
+# 仅在没有 iptables 时的 nft 兜底（有 iptables 的系统走 iptables-nft 即可）。
+hy2_hop_apply_nft() {
+  local start="$1" end="$2" port="$3"
+  if nft list ruleset 2>/dev/null | grep -Fq "udp dport ${start}-${end} redirect to :${port}"; then return 0; fi
+  nft add table ip nat 2>/dev/null || true
+  nft add chain ip nat prerouting '{ type nat hook prerouting priority 0; }' 2>/dev/null || true
+  nft add rule ip nat prerouting udp dport "${start}-${end}" redirect to ":${port}" || return 1
+}
+
+# 最近一次 hy2_hop_persist 失败的原因（成功时为空），供调用方在警告里具体说明。
+_HY2_PERSIST_FAIL=""
+
+# 持久化重定向规则：只用已装好的工具保存，不自动装包（不装 iptables-persistent）；
+# 保存不了返回 1，并把原因记在 _HY2_PERSIST_FAIL 里，由调用方明确提醒用户手动保存，不悄悄跳过。
+# 注意：只写 /etc/iptables/rules.v4 并不能保证开机自动恢复（没装 iptables-persistent
+# 的系统开机时没人读这个文件）；开机恢复靠下面的 hy2_hop_restore_* 服务/cron。
+hy2_hop_persist() {
+  _HY2_PERSIST_FAIL=""
+  if has_cmd netfilter-persistent; then
+    if netfilter-persistent save >/dev/null 2>&1; then return 0; fi
+    _HY2_PERSIST_FAIL="netfilter-persistent save 执行失败"
+  else
+    _HY2_PERSIST_FAIL="未安装 iptables-persistent（没有 netfilter-persistent 命令）"
+  fi
+  if [ "$PKG_MANAGER" = "apk" ] && has_cmd iptables-save; then
+    # Alpine OpenRC 的 iptables 服务从 /etc/iptables/rules-save 恢复
+    if mkdir -p /etc/iptables 2>/dev/null && iptables-save > /etc/iptables/rules-save 2>/dev/null; then
+      return 0
+    fi
+    _HY2_PERSIST_FAIL="iptables-save 写入 /etc/iptables/rules-save 失败"
+    return 1
+  fi
+  if has_cmd iptables-save; then
+    # 新装系统常没有 /etc/iptables 目录：自己建目录再保存，不装任何包。
+    if mkdir -p /etc/iptables 2>/dev/null && iptables-save > /etc/iptables/rules.v4 2>/dev/null; then
+      if has_cmd ip6tables-save; then ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true; fi
+      return 0
+    fi
+    _HY2_PERSIST_FAIL="无法创建 /etc/iptables 或 iptables-save 执行失败"
+    return 1
+  fi
+  _HY2_PERSIST_FAIL="本机没有 iptables-save 可用"
+  return 1
+}
+
+# 只加规则（先查后加，不持久化），供 hy2_hop_apply 与开机恢复共用。
+_hy2_hop_add_rule() {
+  local start="$1" end="$2" port="$3"
+  local applied=0
+  if has_cmd iptables; then
+    if ! hy2_hop_rule_present iptables "$start" "$end" "$port"; then
+      iptables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" || return 1
+    fi
+    applied=1
+  fi
+  if has_cmd ip6tables; then
+    if ! hy2_hop_rule_present ip6tables "$start" "$end" "$port"; then
+      ip6tables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" || return 1
+    fi
+    applied=1
+  fi
+  if [ "$applied" -eq 0 ]; then
+    if has_cmd nft; then
+      hy2_hop_apply_nft "$start" "$end" "$port" || return 1
+    else
+      err "未找到 iptables/ip6tables/nft，无法设置端口跳跃重定向。"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# 验证规则确实在防火墙里（安装后立即核对，不只信“执行成功”）。
+# 有 iptables 就要求 v4 规则在，有 ip6tables 就要求 v6 规则也在；只有 nft 时查 ruleset。
+hy2_hop_rule_verified() {
+  local start="$1" end="$2" port="$3"
+  if has_cmd iptables || has_cmd ip6tables; then
+    if has_cmd iptables && ! hy2_hop_rule_present iptables "$start" "$end" "$port"; then return 1; fi
+    if has_cmd ip6tables && ! hy2_hop_rule_present ip6tables "$start" "$end" "$port"; then return 1; fi
+    return 0
+  fi
+  if has_cmd nft; then
+    nft list ruleset 2>/dev/null | grep -Fq "udp dport ${start}-${end} redirect to :${port}"
+    return $?
+  fi
+  return 1
+}
+
+# 应用端口跳跃重定向（先查后加，重装不重复）。持久化失败只警告，不回滚已生效的规则；
+# 持久化失败时尽量装好开机自恢复服务，重启后规则能自动补回。
+hy2_hop_apply() {
+  local start="$1" end="$2" port="$3"
+  _hy2_hop_add_rule "$start" "$end" "$port" || return 1
+  if ! hy2_hop_persist; then
+    if hy2_hop_restore_sync 2>/dev/null; then
+      warn "端口跳跃规则已生效，但持久化保存失败（${_HY2_PERSIST_FAIL}）。已安装开机自恢复服务，重启后会自动补回规则；也可手动保存，例如 Debian/Ubuntu：apt install -y iptables-persistent && netfilter-persistent save。"
+    else
+      warn "端口跳跃规则已生效，但持久化失败（${_HY2_PERSIST_FAIL}），且开机自恢复服务未能安装：重启后规则会丢失。请手动保存，例如 Debian/Ubuntu：apt install -y iptables-persistent && netfilter-persistent save。"
+    fi
+  fi
+  return 0
+}
+
+# 删除端口跳跃重定向（规则不存在也不报错）。调用前请先确认没有其它 hy2 节点还在用这个范围。
+hy2_hop_remove() {
+  local start="$1" end="$2" port="$3"
+  if has_cmd iptables; then
+    iptables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null || true
+  fi
+  if has_cmd ip6tables; then
+    ip6tables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null || true
+  fi
+  if ! has_cmd iptables && ! has_cmd ip6tables && has_cmd nft; then
+    warn "本机只有 nft 可用，跳跃规则需手动删除：nft delete rule ip nat prerouting udp dport ${start}-${end} redirect to :${port}（按 handle 删除更稳妥）。"
+  fi
+  hy2_hop_persist || warn "端口跳跃规则已删除，但持久化更新失败（${_HY2_PERSIST_FAIL}），重启后旧规则可能恢复，请手动保存。"
+  return 0
+}
+
+# ====================================================
+# Hysteria2 端口跳跃：开机自恢复（方案 B，不装 iptables-persistent）
+# 原理：规则只在内存里，重启会丢。服务/cron 在开机时读 meta.json，
+# 把每个 hy2 节点存的跳跃范围重新加回防火墙。服务由脚本自己建、
+# 卸载时自己拆，不动系统包。
+# ====================================================
+
+HY2_HOP_RESTORE_SERVICE="/etc/systemd/system/sing-box-hy2-hop-restore.service"
+HY2_HOP_RESTORE_CRON_MARK="sing-box-hy2-hop-restore"
+
+# meta 里是否还有任何 hy2 节点的跳跃范围。
+hy2_hop_has_any_range() {
+  local meta_json="${1:-}"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq -e '
+    [ to_entries[]
+      | select(.key | startswith("hy2-"))
+      | select(.value.hop_start != null and .value.hop_end != null) ] | length > 0' >/dev/null 2>&1
+}
+
+# 开机恢复入口（sb.sh --restore-hy2-hops 调用）：按 meta 把所有跳跃规则补回来。
+# 不调持久化——恢复本身就是持久化的手段；失败返回 1 供 systemd/cron 日志查看。
+hy2_hop_restore_all() {
+  local meta_json
+  meta_json="$(meta_load 2>/dev/null)" || meta_json='{}'
+  [ -n "$meta_json" ] || meta_json='{}'
+  local _ok=0 _tag _start _end _port
+  while IFS=' ' read -r _tag _start _end; do
+    [ -n "$_tag" ] || continue
+    _port="$(entry_key_to_port "$_tag")"
+    if ! hy2_hop_range_valid "$_start" "$_end" "$_port" 2>/dev/null; then
+      warn "开机恢复跳过无效的跳跃范围：${_tag} ${_start}-${_end}。"
+      _ok=1
+      continue
+    fi
+    if ! _hy2_hop_add_rule "$_start" "$_end" "$_port"; then
+      warn "开机恢复跳跃规则失败：${_tag} UDP ${_start}-${_end} -> ${_port}。"
+      _ok=1
+    fi
+  done <<EOF
+$(echo "$meta_json" | jq -r 'to_entries[] | select(.key | startswith("hy2-")) | select(.value.hop_start != null and .value.hop_end != null) | "\(.key) \(.value.hop_start) \(.value.hop_end)"' 2>/dev/null)
+EOF
+  return $_ok
+}
+
+_hy2_hop_restore_service_installed() {
+  [ -f "$HY2_HOP_RESTORE_SERVICE" ] && grep -Fq -- "--restore-hy2-hops" "$HY2_HOP_RESTORE_SERVICE" 2>/dev/null
+}
+
+_hy2_hop_restore_cron_installed() {
+  has_cmd crontab || return 1
+  crontab -l 2>/dev/null | grep -Fq "$HY2_HOP_RESTORE_CRON_MARK"
+}
+
+# 装开机恢复：优先 systemd oneshot 服务；没有 systemd 时退到 @reboot cron；
+# 两者都没有则返回 1，由调用方提醒用户手动处理。
+hy2_hop_restore_install() {
+  if _hy2_hop_restore_service_installed || _hy2_hop_restore_cron_installed; then return 0; fi
+  if has_cmd systemctl && [ -d /run/systemd/system ]; then
+    mkdir -p /etc/systemd/system || return 1
+    cat > "$HY2_HOP_RESTORE_SERVICE" <<EOF
+[Unit]
+Description=Restore Hysteria2 port hopping iptables rules
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=/bin/bash ${SB_TARGET_SCRIPT} --restore-hy2-hops
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable sing-box-hy2-hop-restore.service >/dev/null 2>&1 || return 1
+    _hy2_hop_restore_service_installed
+    return $?
+  fi
+  if has_cmd crontab; then
+    local tmp
+    tmp="$(mktemp)" || return 1
+    crontab -l 2>/dev/null | grep -v "$HY2_HOP_RESTORE_CRON_MARK" > "$tmp" || true
+    echo "@reboot /bin/bash ${SB_TARGET_SCRIPT} --restore-hy2-hops >/dev/null 2>&1 # ${HY2_HOP_RESTORE_CRON_MARK}" >> "$tmp"
+    crontab "$tmp" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+    _hy2_hop_restore_cron_installed
+    return $?
+  fi
+  return 1
+}
+
+# 拆开机恢复（服务和 cron 都清，只在没有跳跃范围剩下时调用）。
+hy2_hop_restore_remove() {
+  if [ -f "$HY2_HOP_RESTORE_SERVICE" ]; then
+    systemctl disable --now sing-box-hy2-hop-restore.service >/dev/null 2>&1 || true
+    rm -f "$HY2_HOP_RESTORE_SERVICE" || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  if has_cmd crontab; then
+    local tmp
+    tmp="$(mktemp)" || return 0
+    crontab -l 2>/dev/null | grep -v "$HY2_HOP_RESTORE_CRON_MARK" > "$tmp" || true
+    if [ -s "$tmp" ]; then
+      crontab "$tmp" || true
+    else
+      crontab -r 2>/dev/null || true
+    fi
+    rm -f "$tmp"
+  fi
+  return 0
+}
+
+# 按 meta 现状同步开机恢复：还有跳跃范围就确保装好，一个不剩就拆掉。
+hy2_hop_restore_sync() {
+  local meta_json
+  meta_json="$(meta_load 2>/dev/null)" || meta_json='{}'
+  [ -n "$meta_json" ] || meta_json='{}'
+  if hy2_hop_has_any_range "$meta_json"; then
+    hy2_hop_restore_install
+  else
+    hy2_hop_restore_remove
+  fi
+}
+
 find_inbound_by_entry_key() {
   local json="$1" entry_key="$2"
   echo "$json" | jq -c --arg ek "$entry_key" '.inbounds[]? | select(.tag==$ek)' | head -n1
