@@ -405,6 +405,8 @@ build_hysteria2_inbound() {
   tls_cert_for_prefix "hy2" "$port" "$sni" || return 1
   crt="$_TLS_CRT"; key="$_TLS_KEY"
   # 带宽不限：不写 up_mbps/down_mbps；不设 gecko min/max 包大小，用 sing-box 默认 512/1200。
+  # 忽略客户端上报带宽、双端强制走 BBR：不写 up/down 时 ignore_client_bandwidth=true 才会生效，
+  # 客户端报多少都不切 Brutal；若以后填了 up/down，二者会冲突，届时须去掉这一行。
   jq -n --arg tag "$entry_key" --arg pass "$pass" --arg sni "$sni" --arg crt "$crt" --arg key "$key" \
     --arg obfs_type "$obfs_type" --arg obfs_pass "$obfs_pass" --argjson port "$port" '
     {
@@ -413,6 +415,7 @@ build_hysteria2_inbound() {
       "listen":"::",
       "listen_port":$port,
       "users":[{"name":$tag,"password":$pass}],
+      "ignore_client_bandwidth":true,
       "tls":{"enabled":true,"server_name":$sni,"alpn":["h3"],"certificate_path":$crt,"key_path":$key}
     }
     | if $obfs_type != "" then .obfs = {"type":$obfs_type,"password":$obfs_pass} else . end
