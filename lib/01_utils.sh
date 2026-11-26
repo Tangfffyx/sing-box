@@ -373,7 +373,40 @@ ask_port_or_return() {
 
 json_is_object() {
   local s="${1:-}"
-  [ -n "$s" ] && echo "$s" | jq -e 'type=="object"' >/dev/null 2>&1
+  [ -n "$s" ] && printf '%s' "$s" | jq -e 'type=="object"' >/dev/null 2>&1
+}
+
+backup_corrupt_json_file() {
+  local path="$1" ts backup
+  [ -s "$path" ] || return 0
+  ts="$(date +%Y%m%d_%H%M%S)"
+  backup="${path}.corrupt.${ts}"
+  if [ ! -e "$backup" ]; then
+    cp -a "$path" "$backup" 2>/dev/null || true
+    warn "检测到文件格式损坏，已自动备份到：${backup}" >&2
+  fi
+}
+
+atomic_write_json_file() {
+  local target="$1" json="$2" label="${3:-数据文件}"
+  local dir tmp_file
+  dir="$(dirname "$target")"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  tmp_file="$(mktemp "${target}.tmp.XXXXXX")" || return 1
+  if printf '%s\n' "$json" | jq . > "$tmp_file"; then
+    chmod 600 "$tmp_file" 2>/dev/null || true
+    if ! mv -f "$tmp_file" "$target"; then
+      err "${label}写入失败：${target}"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
+    chmod 600 "$target" 2>/dev/null || true
+    return 0
+  fi
+  rm -f "$tmp_file" >/dev/null 2>&1 || true
+  err "${label}格式无效，已放弃写入。"
+  return 1
 }
 
 format_traffic_auto() {

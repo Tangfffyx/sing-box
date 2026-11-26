@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 # ============================================================
-# Sing-box Elite Management System
+# Sing-box Management System
 # 由 build.sh 自动合并生成，请勿直接编辑此文件
-# 源码位于 lib/ 目录下的各模块文件
+# 源码位于 lib/ 与 py/ 目录
 # ============================================================
 
 
@@ -708,7 +708,40 @@ ask_port_or_return() {
 
 json_is_object() {
   local s="${1:-}"
-  [ -n "$s" ] && echo "$s" | jq -e 'type=="object"' >/dev/null 2>&1
+  [ -n "$s" ] && printf '%s' "$s" | jq -e 'type=="object"' >/dev/null 2>&1
+}
+
+backup_corrupt_json_file() {
+  local path="$1" ts backup
+  [ -s "$path" ] || return 0
+  ts="$(date +%Y%m%d_%H%M%S)"
+  backup="${path}.corrupt.${ts}"
+  if [ ! -e "$backup" ]; then
+    cp -a "$path" "$backup" 2>/dev/null || true
+    warn "检测到文件格式损坏，已自动备份到：${backup}" >&2
+  fi
+}
+
+atomic_write_json_file() {
+  local target="$1" json="$2" label="${3:-数据文件}"
+  local dir tmp_file
+  dir="$(dirname "$target")"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  tmp_file="$(mktemp "${target}.tmp.XXXXXX")" || return 1
+  if printf '%s\n' "$json" | jq . > "$tmp_file"; then
+    chmod 600 "$tmp_file" 2>/dev/null || true
+    if ! mv -f "$tmp_file" "$target"; then
+      err "${label}写入失败：${target}"
+      rm -f "$tmp_file" >/dev/null 2>&1 || true
+      return 1
+    fi
+    chmod 600 "$target" 2>/dev/null || true
+    return 0
+  fi
+  rm -f "$tmp_file" >/dev/null 2>&1 || true
+  err "${label}格式无效，已放弃写入。"
+  return 1
 }
 
 format_traffic_auto() {
@@ -907,29 +940,27 @@ config_migrate_114() {
 }
 
 config_load() {
-  if [ -s "$CONFIG_FILE" ] && jq -e . "$CONFIG_FILE" >/dev/null 2>&1; then
-    config_normalize "$(cat "$CONFIG_FILE")"
-  else
-    config_min_template | config_migrate_114
+  if [ -s "$CONFIG_FILE" ]; then
+    if jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1; then
+      config_normalize "$(cat "$CONFIG_FILE")"
+      return 0
+    fi
+    backup_corrupt_json_file "$CONFIG_FILE"
   fi
+  config_min_template | config_migrate_114
 }
 
 config_ensure_exists() {
   mkdir -p /etc/sing-box
   chmod 700 /etc/sing-box 2>/dev/null || true
   if [ ! -e "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
-    warn "未发现配置文件，将写入最小模板：$CONFIG_FILE"
     config_min_template | config_migrate_114 > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
 
-  if ! jq -e . "$CONFIG_FILE" >/dev/null 2>&1; then
-    local ts broken
-    ts="$(date +%Y%m%d_%H%M%S)"
-    broken="${CONFIG_FILE}.broken.${ts}"
-    cp -a "$CONFIG_FILE" "$broken" 2>/dev/null || true
-    warn "检测到配置文件不是合法 JSON，已备份到：$broken"
+  if ! jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1; then
+    backup_corrupt_json_file "$CONFIG_FILE"
     config_min_template | config_migrate_114 > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
@@ -1736,21 +1767,6 @@ build_socks_inbound() {
   '
 }
 
-# ---------- 证书清理 ----------
-
-cleanup_inbound_generated_cert_files() {
-  local json="$1" entry_key="$2"
-  local crt key
-  crt="$(echo "$json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.certificate_path // empty' | head -n1)"
-  key="$(echo "$json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.key_path // empty' | head -n1)"
-  if [ -n "$crt" ] && [[ "$crt" == /etc/sing-box/* ]]; then
-    rm -f "$crt" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$key" ] && [[ "$key" == /etc/sing-box/* ]]; then
-    rm -f "$key" >/dev/null 2>&1 || true
-  fi
-}
-
 # ---------- 用户对象构建（按协议类型分派） ----------
 
 build_user_object_from_inbound() {
@@ -2057,10 +2073,35 @@ hy2_hop_remove() {
     ip6tables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null || true
   fi
   if ! has_cmd iptables && ! has_cmd ip6tables && has_cmd nft; then
-    warn "本机只有 nft 可用，跳跃规则需手动删除：nft delete rule ip nat prerouting udp dport ${start}-${end} redirect to :${port}（按 handle 删除更稳妥）。"
+    local fam handle
+    for fam in ip ip6; do
+      while IFS= read -r handle; do
+        [ -n "$handle" ] && nft delete rule "$fam" nat prerouting handle "$handle" 2>/dev/null || true
+      done < <(nft -a list chain "$fam" nat prerouting 2>/dev/null \
+        | awk -v pat="udp dport ${start}-${end} redirect to :${port}" 'index($0, pat) && /# handle [0-9]+/ { print $NF }')
+    done
   fi
-  hy2_hop_persist || warn "端口跳跃规则已删除，但持久化更新失败（${_HY2_PERSIST_FAIL}），重启后旧规则可能恢复，请手动保存。"
+  hy2_hop_persist >/dev/null 2>&1 || true
   return 0
+}
+
+# 彻底卸载时调用：按 meta 清理全部端口跳跃防火墙规则与开机自恢复服务。
+hy2_hop_remove_all_from_meta() {
+  local meta_json _tag _start _end _port
+  meta_json="$(meta_load 2>/dev/null)" || meta_json='{}'
+  [ -n "$meta_json" ] || meta_json='{}'
+  while IFS=' ' read -r _tag _start _end; do
+    [ -n "$_tag" ] || continue
+    _port="$(entry_key_to_port "$_tag")"
+    [ -n "$_port" ] || continue
+    hy2_hop_remove "$_start" "$_end" "$_port" 2>/dev/null || true
+  done < <(printf '%s\n' "$meta_json" | jq -r '
+    to_entries[]
+    | select(.key | startswith("hy2-"))
+    | select(.value.hop_start != null and .value.hop_end != null)
+    | "\(.key) \(.value.hop_start) \(.value.hop_end)"
+  ' 2>/dev/null)
+  hy2_hop_restore_remove >/dev/null 2>&1 || true
 }
 
 # ====================================================
@@ -2796,14 +2837,6 @@ relay_prompt_landing_details() {
   printf -v "$username_var" '%s' "${_username:-}"
   printf -v "$password_var" '%s' "${_password:-}"
   return 0
-}
-
-relay_prompt_socks_landing() {
-  local land_var="$1" ip_var="$2" port_var="$3" username_var="$4" password_var="$5"
-  local _land
-  relay_prompt_landing_id _land || return 1
-  relay_prompt_landing_details "$_land" "$ip_var" "$port_var" "$username_var" "$password_var" || return 1
-  printf -v "$land_var" '%s' "$_land"
 }
 
 relay_landing_to_meta_json() {
@@ -3793,26 +3826,6 @@ account_usage_snapshot() {
   '
 }
 
-build_live_usage_object() {
-  local stats_json="$1"
-  echo "$stats_json" | jq -c '
-    reduce (.[]? | select((.name // "") | test("^user>>>.*>>>traffic>>>(downlink|uplink)$"))) as $s
-      ({admin:{up:0,down:0}};
-        (($s.name // "") | capture("^user>>>(?<user>.+)>>>traffic>>>(?<dir>downlink|uplink)$")) as $m
-        | ($m.user) as $uname
-        | ($m.dir) as $dir
-        | ($s.value // 0 | tonumber? // 0) as $val
-        | (if ($uname | contains("@")) then ($uname | split("@")[1]) else "admin" end) as $biz
-        | .[$biz] = (.[$biz] // {up:0,down:0})
-        | if $dir == "uplink" then
-            .[$biz].up = ((.[$biz].up // 0) + $val)
-          else
-            .[$biz].down = ((.[$biz].down // 0) + $val)
-          end
-      )
-  '
-}
-
 sync_user_usage_counters() {
   with_manager_lock _sync_user_usage_counters_body
 }
@@ -3823,47 +3836,31 @@ _sync_user_usage_counters_body() {
   # 尚未启用统计的首次安装，不读取不存在的 API。
   jq -e '.experimental.v2ray_api.stats.enabled == true' "$CONFIG_FILE" >/dev/null 2>&1 || return 0
   local snapshot db_json
-  snapshot="$(query_usage_snapshot)" || { warn "统计采样失败，本次未修改流量基线。"; return 1; }
+  snapshot="$(query_usage_snapshot)" || { warn "流量采样失败，本次保持原统计数据不变。"; return 1; }
   db_json="$(account_usage_snapshot "$(user_db_load)" "$snapshot")" || return 1
-  user_db_save "$db_json" || { warn "用户流量统计落盘失败：$USER_DB_FILE"; return 1; }
+  user_db_save "$db_json" || { warn "流量数据保存失败：$USER_DB_FILE"; return 1; }
 }
 
-# ---------- Meta 存储（Reality 公钥等） ----------
+# ---------- Meta 存储（Reality 公钥、分流与跳跃元数据） ----------
 
 meta_load() {
-  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
-    cat "$META_FILE"
-  else
-    echo '{}'
+  if [ -s "$META_FILE" ]; then
+    if jq -e 'type == "object"' "$META_FILE" >/dev/null 2>&1; then
+      cat "$META_FILE"
+      return 0
+    fi
+    backup_corrupt_json_file "$META_FILE"
   fi
+  echo '{}'
 }
 
 meta_save() {
-  local meta_json="$1"
-  mkdir -p "$(dirname "$META_FILE")"
-  chmod 700 "$(dirname "$META_FILE")" 2>/dev/null || true
-  local tmp_file
-  tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")" || return 1
-  if echo "$meta_json" | jq . > "$tmp_file"; then
-    if ! mv -f "$tmp_file" "$META_FILE"; then
-      err "元数据写入失败：$META_FILE"
-      rm -f "$tmp_file" >/dev/null 2>&1 || true
-      return 1
-    fi
-    chmod 600 "$META_FILE" 2>/dev/null || true
-  else
-    rm -f "$tmp_file"
-    return 1
-  fi
+  with_manager_lock _meta_save_body "$@"
 }
 
-meta_set_reality_public_key() {
-  local tag="$1" public_key="$2"
-  [ -n "$tag" ] && [ -n "$public_key" ] || return 0
-  local meta_json
-  meta_json="$(meta_load)"
-  meta_json="$(echo "$meta_json" | jq --arg t "$tag" --arg pk "$public_key" '.[$t] = ((.[$t] // {}) + {public_key:$pk, private_key_auto_generated:true})')" || return 1
-  meta_save "$meta_json"
+_meta_save_body() {
+  local meta_json="$1"
+  atomic_write_json_file "$META_FILE" "$meta_json" "节点元数据"
 }
 
 meta_get_reality_public_key() {
@@ -3915,9 +3912,12 @@ user_db_exists() {
 user_db_load() {
   if user_db_exists; then
     cat "$USER_DB_FILE"
-  else
-    user_db_min_template
+    return 0
   fi
+  if [ -s "$USER_DB_FILE" ] && ! jq -e . "$USER_DB_FILE" >/dev/null 2>&1; then
+    backup_corrupt_json_file "$USER_DB_FILE"
+  fi
+  user_db_min_template
 }
 
 user_db_save() {
@@ -3933,7 +3933,7 @@ _user_db_touch_data_updated_at_body() {
   local db_json now_text
   db_json="$(user_db_load)"
   now_text="$(date '+%Y-%m-%d %H:%M:%S')"
-  db_json="$(echo "$db_json" | jq --arg now "$now_text" '
+  db_json="$(printf '%s\n' "$db_json" | jq --arg now "$now_text" '
     .meta = (.meta // {})
     | .meta.data_updated_at_text = $now
   ')" || return 1
@@ -3942,21 +3942,8 @@ _user_db_touch_data_updated_at_body() {
 
 _user_db_save_body() {
   local db_json="$1"
-  mkdir -p "$(dirname "$USER_DB_FILE")" /etc/sing-box
-  chmod 700 "$(dirname "$USER_DB_FILE")" 2>/dev/null || true
-  local tmp_file
-  tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")" || return 1
-  if echo "$db_json" | jq . > "$tmp_file"; then
-    if ! mv -f "$tmp_file" "$USER_DB_FILE"; then
-      err "用户数据库写入失败：$USER_DB_FILE"
-      rm -f "$tmp_file" >/dev/null 2>&1 || true
-      return 1
-    fi
-    chmod 600 "$USER_DB_FILE" 2>/dev/null || true
-  else
-    rm -f "$tmp_file"
-    return 1
-  fi
+  mkdir -p /etc/sing-box 2>/dev/null || true
+  atomic_write_json_file "$USER_DB_FILE" "$db_json" "用户数据库"
 }
 
 user_billable_bytes() {
@@ -5136,11 +5123,14 @@ JSON
 }
 
 tg_config_load() {
-  if [ -s "$TG_CONFIG_FILE" ] && jq -e . "$TG_CONFIG_FILE" >/dev/null 2>&1; then
-    cat "$TG_CONFIG_FILE"
-  else
-    tg_config_min_template
+  if [ -s "$TG_CONFIG_FILE" ]; then
+    if jq -e 'type == "object"' "$TG_CONFIG_FILE" >/dev/null 2>&1; then
+      cat "$TG_CONFIG_FILE"
+      return 0
+    fi
+    backup_corrupt_json_file "$TG_CONFIG_FILE"
   fi
+  tg_config_min_template
 }
 
 tg_config_save() {
@@ -5149,29 +5139,18 @@ tg_config_save() {
 
 _tg_config_save_body() {
   local json="$1"
-  mkdir -p "$(dirname "$TG_CONFIG_FILE")"
-  chmod 700 "$(dirname "$TG_CONFIG_FILE")" 2>/dev/null || true
-  local tmp_file
-  tmp_file="$(mktemp "${TG_CONFIG_FILE}.tmp.XXXXXX")" || return 1
-  if echo "$json" | jq . > "$tmp_file"; then
-    if ! mv -f "$tmp_file" "$TG_CONFIG_FILE"; then
-      err "TG 配置写入失败：$TG_CONFIG_FILE"
-      rm -f "$tmp_file" >/dev/null 2>&1 || true
-      return 1
-    fi
-    chmod 600 "$TG_CONFIG_FILE" 2>/dev/null || true
-  else
-    rm -f "$tmp_file" >/dev/null 2>&1 || true
-    return 1
-  fi
+  atomic_write_json_file "$TG_CONFIG_FILE" "$json" "Telegram 配置"
 }
 
 tg_task_receipts_load() {
-  if [ -s "$TG_TASK_RECEIPTS_FILE" ] && jq -e . "$TG_TASK_RECEIPTS_FILE" >/dev/null 2>&1; then
-    cat "$TG_TASK_RECEIPTS_FILE"
-  else
-    echo '{"tasks":{}}'
+  if [ -s "$TG_TASK_RECEIPTS_FILE" ]; then
+    if jq -e 'type == "object"' "$TG_TASK_RECEIPTS_FILE" >/dev/null 2>&1; then
+      cat "$TG_TASK_RECEIPTS_FILE"
+      return 0
+    fi
+    backup_corrupt_json_file "$TG_TASK_RECEIPTS_FILE"
   fi
+  echo '{"tasks":{}}'
 }
 
 # Setup 流程的"持锁原子提交" helper（6.1.6 起）。
@@ -5273,21 +5252,7 @@ _tg_prune_reports_body() {
 
 tg_task_receipts_save() {
   local json="$1"
-  mkdir -p "$(dirname "$TG_TASK_RECEIPTS_FILE")"
-  chmod 700 "$(dirname "$TG_TASK_RECEIPTS_FILE")" 2>/dev/null || true
-  local tmp_file
-  tmp_file="$(mktemp "${TG_TASK_RECEIPTS_FILE}.tmp.XXXXXX")" || return 1
-  if echo "$json" | jq . > "$tmp_file"; then
-    if ! mv -f "$tmp_file" "$TG_TASK_RECEIPTS_FILE"; then
-      err "TG 任务回执写入失败：$TG_TASK_RECEIPTS_FILE"
-      rm -f "$tmp_file" >/dev/null 2>&1 || true
-      return 1
-    fi
-    chmod 600 "$TG_TASK_RECEIPTS_FILE" 2>/dev/null || true
-  else
-    rm -f "$tmp_file" >/dev/null 2>&1 || true
-    return 1
-  fi
+  atomic_write_json_file "$TG_TASK_RECEIPTS_FILE" "$json" "Telegram 任务回执"
 }
 
 tg_task_receipt_get() {
@@ -5400,17 +5365,28 @@ tg_require_python3() {
 
 tg_write_center_app() {
   mkdir -p "$(dirname "$TG_CENTER_APP")"
-  cat > "$TG_CENTER_APP" <<'PY'
+  local repo_py=""
+  if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    repo_py="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/py/tg_center_bot.py"
+  fi
+  if [ -n "$repo_py" ] && [ -f "$repo_py" ]; then
+    cp -f "$repo_py" "$TG_CENTER_APP"
+  else
+    cat > "$TG_CENTER_APP" <<'PY'
 #!/usr/bin/env python3
 import contextlib
 import datetime
 import fcntl
+import hmac
 import http.server
 import json
+import logging
 import os
 import re
 import secrets
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -5418,15 +5394,32 @@ import urllib.parse
 import urllib.request
 
 CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 else "/etc/sing-box-manager/telegram.json"
-LOCK_PATH = "/var/lock/singbox-manager.lock"
+LOCK_PATH = os.environ.get("SB_LOCK_FILE") or "/var/lock/singbox-manager.lock"
 REPORT_ONLINE_SECONDS = 900
+MAX_REQUEST_BYTES = 1024 * 1024  # 1 MiB ceiling against malformed/oversized POST payloads
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("sb-tg-center")
 
 
 def load_config():
+    if not os.path.exists(CONFIG_PATH):
+        return {}
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning("Failed to parse %s: %s", CONFIG_PATH, exc)
+        try:
+            backup = f"{CONFIG_PATH}.corrupt.{int(time.time())}"
+            if not os.path.exists(backup):
+                shutil.copy2(CONFIG_PATH, backup)
+        except OSError:
+            pass
         return {}
 
 
@@ -5441,7 +5434,7 @@ def save_config(cfg):
 @contextlib.contextmanager
 def file_lock():
     """跨进程文件锁，与 bash with_manager_lock 共享 SB_LOCK_FILE。"""
-    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(LOCK_PATH) or ".", exist_ok=True)
     fd = os.open(LOCK_PATH, os.O_CREAT | os.O_WRONLY, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -5459,16 +5452,23 @@ def file_lock():
 
 def save_config_unlocked(cfg):
     """save_config 的不持锁版本——调用方已在 file_lock / cfg_lock 内时用这个。"""
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, CONFIG_PATH)
+    cfg_dir = os.path.dirname(CONFIG_PATH) or "."
+    os.makedirs(cfg_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".telegram.tmp.", dir=cfg_dir)
     try:
-        os.chmod(CONFIG_PATH, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CONFIG_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 @contextlib.contextmanager
@@ -5562,8 +5562,7 @@ def get_bot_username(cfg):
 
 def today():
     # 锁定北京时间（UTC+8），与 bash 端的 user_today_date / BUSINESS_TZ 保持一致。
-    # 用 utcnow + 8h 而非 zoneinfo，零依赖、不挑 Python 版本。
-    return (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).date()
+    return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).date()
 
 
 def parse_date(value):
@@ -6530,13 +6529,27 @@ def process_updates():
 def authorized(handler):
     secret = load_config().get("access_secret") or ""
     got = handler.headers.get("X-SB-TG-Secret", "")
-    return secret and got == secret
+    if not secret or not got:
+        return False
+    return hmac.compare_digest(str(got), str(secret))
+
+
+class PayloadTooLargeError(ValueError):
+    pass
 
 
 def read_json(handler):
-    length = int(handler.headers.get("Content-Length") or 0)
+    raw_len = handler.headers.get("Content-Length") or "0"
+    length = int(raw_len)
+    if length < 0:
+        raise ValueError("negative content-length")
+    if length > MAX_REQUEST_BYTES:
+        raise PayloadTooLargeError("payload too large")
     body = handler.rfile.read(length) if length > 0 else b"{}"
-    return json.loads(body.decode("utf-8") or "{}")
+    data = json.loads(body.decode("utf-8") or "{}")
+    if not isinstance(data, dict):
+        raise ValueError("json payload must be an object")
+    return data
 
 
 def write_json(handler, code, payload):
@@ -6606,6 +6619,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         try:
             payload = read_json(self)
+        except PayloadTooLargeError:
+            write_json(self, 413, {"ok": False, "error": "payload_too_large"})
+            return
         except Exception:
             write_json(self, 400, {"ok": False, "error": "bad_json"})
             return
@@ -6614,15 +6630,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with cfg_lock():
                 cfg = load_config()
                 reports = cfg.setdefault("reports", {})
+                now_utc8 = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)
                 payload["received_at"] = int(time.time())
-                payload["received_at_text"] = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+                payload["received_at_text"] = now_utc8.strftime("%Y-%m-%d %H:%M:%S")
                 payload["updated_at_text"] = payload.get("data_updated_at_text") or ""
                 reports[payload.get("vps_id") or "unknown"] = payload
-                changed = evaluate_reminders(cfg, payload)
-                if changed:
-                    save_config_unlocked(cfg)
-                else:
-                    save_config_unlocked(cfg)
+                evaluate_reminders(cfg, payload)
+                save_config_unlocked(cfg)
             write_json(self, 200, {"ok": True})
             return
 
@@ -6751,6 +6765,7 @@ if __name__ == "__main__":
     threading.Thread(target=process_updates, daemon=True).start()
     run_http()
 PY
+  fi
   chmod 700 "$TG_CENTER_APP" >/dev/null 2>&1 || true
 }
 
@@ -8567,8 +8582,6 @@ version_ge() {
   '
 }
 
-ensure_sagernet_repo() { :; }
-
 # ---------- 版本管理 ----------
 
 get_release_latest_tag() {
@@ -8865,11 +8878,8 @@ _remove_cron_job() {
   rm -f "$tmp"
 }
 
-install_log_maintain_cron() { _install_cron_job "$LOG_MAINTAIN_CRON_MARK" "$LOG_MAINTAIN_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --maintain-logs"; }
-remove_log_maintain_cron()  { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
-install_user_watch_cron()   { _install_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --user-watch"; }
-remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
-install_upstream_refresh_cron() { _install_cron_job "$UPSTREAM_REFRESH_CRON_MARK" "$UPSTREAM_REFRESH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --refresh-upstream"; }
+remove_log_maintain_cron()      { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
+remove_user_watch_cron()        { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
 remove_upstream_refresh_cron()  { _remove_cron_job "$UPSTREAM_REFRESH_CRON_MARK"; }
 install_periodic_sync_cron()    { _install_cron_job "$PERIODIC_SYNC_CRON_MARK" "$PERIODIC_SYNC_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --periodic-sync"; }
 remove_periodic_sync_cron()     { _remove_cron_job "$PERIODIC_SYNC_CRON_MARK"; }

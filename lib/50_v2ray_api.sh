@@ -175,26 +175,6 @@ account_usage_snapshot() {
   '
 }
 
-build_live_usage_object() {
-  local stats_json="$1"
-  echo "$stats_json" | jq -c '
-    reduce (.[]? | select((.name // "") | test("^user>>>.*>>>traffic>>>(downlink|uplink)$"))) as $s
-      ({admin:{up:0,down:0}};
-        (($s.name // "") | capture("^user>>>(?<user>.+)>>>traffic>>>(?<dir>downlink|uplink)$")) as $m
-        | ($m.user) as $uname
-        | ($m.dir) as $dir
-        | ($s.value // 0 | tonumber? // 0) as $val
-        | (if ($uname | contains("@")) then ($uname | split("@")[1]) else "admin" end) as $biz
-        | .[$biz] = (.[$biz] // {up:0,down:0})
-        | if $dir == "uplink" then
-            .[$biz].up = ((.[$biz].up // 0) + $val)
-          else
-            .[$biz].down = ((.[$biz].down // 0) + $val)
-          end
-      )
-  '
-}
-
 sync_user_usage_counters() {
   with_manager_lock _sync_user_usage_counters_body
 }
@@ -205,47 +185,31 @@ _sync_user_usage_counters_body() {
   # 尚未启用统计的首次安装，不读取不存在的 API。
   jq -e '.experimental.v2ray_api.stats.enabled == true' "$CONFIG_FILE" >/dev/null 2>&1 || return 0
   local snapshot db_json
-  snapshot="$(query_usage_snapshot)" || { warn "统计采样失败，本次未修改流量基线。"; return 1; }
+  snapshot="$(query_usage_snapshot)" || { warn "流量采样失败，本次保持原统计数据不变。"; return 1; }
   db_json="$(account_usage_snapshot "$(user_db_load)" "$snapshot")" || return 1
-  user_db_save "$db_json" || { warn "用户流量统计落盘失败：$USER_DB_FILE"; return 1; }
+  user_db_save "$db_json" || { warn "流量数据保存失败：$USER_DB_FILE"; return 1; }
 }
 
-# ---------- Meta 存储（Reality 公钥等） ----------
+# ---------- Meta 存储（Reality 公钥、分流与跳跃元数据） ----------
 
 meta_load() {
-  if [ -s "$META_FILE" ] && jq -e . "$META_FILE" >/dev/null 2>&1; then
-    cat "$META_FILE"
-  else
-    echo '{}'
+  if [ -s "$META_FILE" ]; then
+    if jq -e 'type == "object"' "$META_FILE" >/dev/null 2>&1; then
+      cat "$META_FILE"
+      return 0
+    fi
+    backup_corrupt_json_file "$META_FILE"
   fi
+  echo '{}'
 }
 
 meta_save() {
-  local meta_json="$1"
-  mkdir -p "$(dirname "$META_FILE")"
-  chmod 700 "$(dirname "$META_FILE")" 2>/dev/null || true
-  local tmp_file
-  tmp_file="$(mktemp "${META_FILE}.tmp.XXXXXX")" || return 1
-  if echo "$meta_json" | jq . > "$tmp_file"; then
-    if ! mv -f "$tmp_file" "$META_FILE"; then
-      err "元数据写入失败：$META_FILE"
-      rm -f "$tmp_file" >/dev/null 2>&1 || true
-      return 1
-    fi
-    chmod 600 "$META_FILE" 2>/dev/null || true
-  else
-    rm -f "$tmp_file"
-    return 1
-  fi
+  with_manager_lock _meta_save_body "$@"
 }
 
-meta_set_reality_public_key() {
-  local tag="$1" public_key="$2"
-  [ -n "$tag" ] && [ -n "$public_key" ] || return 0
-  local meta_json
-  meta_json="$(meta_load)"
-  meta_json="$(echo "$meta_json" | jq --arg t "$tag" --arg pk "$public_key" '.[$t] = ((.[$t] // {}) + {public_key:$pk, private_key_auto_generated:true})')" || return 1
-  meta_save "$meta_json"
+_meta_save_body() {
+  local meta_json="$1"
+  atomic_write_json_file "$META_FILE" "$meta_json" "节点元数据"
 }
 
 meta_get_reality_public_key() {

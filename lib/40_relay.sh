@@ -159,14 +159,6 @@ relay_prompt_landing_details() {
   return 0
 }
 
-relay_prompt_socks_landing() {
-  local land_var="$1" ip_var="$2" port_var="$3" username_var="$4" password_var="$5"
-  local _land
-  relay_prompt_landing_id _land || return 1
-  relay_prompt_landing_details "$_land" "$ip_var" "$port_var" "$username_var" "$password_var" || return 1
-  printf -v "$land_var" '%s' "$_land"
-}
-
 relay_landing_to_meta_json() {
   local land="$1" ip="$2" port="$3" username="${4:-}" password="${5:-}"
   jq -n --arg id "$land" --arg server "$ip" --arg username "$username" --arg password "$password" --argjson port "$port" '

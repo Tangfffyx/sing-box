@@ -208,6 +208,28 @@ test_openrc_restart() {
   reload_or_restart_singbox_safe
 }
 
+test_corrupt_json_backup() {
+  local dir="$TEST_TMP/corrupt"
+  mkdir -p "$dir"
+  CONFIG_FILE="$dir/config.json"
+  META_FILE="$dir/meta.json"
+  USER_DB_FILE="$dir/users.json"
+  SB_LOCK_FILE="$dir/manager.lock"
+  printf '{broken' > "$CONFIG_FILE"
+  printf '{broken' > "$META_FILE"
+  printf '{broken' > "$USER_DB_FILE"
+  config_load >/dev/null 2>&1
+  meta_load >/dev/null 2>&1
+  user_db_load >/dev/null 2>&1
+  [ "$(find "$dir" -maxdepth 1 -name 'config.json.corrupt.*' | wc -l)" -eq 1 ]
+  [ "$(find "$dir" -maxdepth 1 -name 'meta.json.corrupt.*' | wc -l)" -eq 1 ]
+  [ "$(find "$dir" -maxdepth 1 -name 'users.json.corrupt.*' | wc -l)" -eq 1 ]
+  atomic_write_json_file "$META_FILE" '{"ok":true}' "test"
+  assert_json "$(cat "$META_FILE")" '.ok == true'
+  if atomic_write_json_file "$META_FILE" '{invalid' "test" 2>/dev/null; then return 1; fi
+  assert_json "$(cat "$META_FILE")" '.ok == true'
+}
+
 run test_routes
 run test_accounting
 run test_user_edits
@@ -217,3 +239,4 @@ run test_ready_and_restart
 run test_install_transaction
 run test_linux_lock_and_process
 run test_openrc_restart
+run test_corrupt_json_backup

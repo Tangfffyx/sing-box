@@ -40,9 +40,12 @@ user_db_exists() {
 user_db_load() {
   if user_db_exists; then
     cat "$USER_DB_FILE"
-  else
-    user_db_min_template
+    return 0
   fi
+  if [ -s "$USER_DB_FILE" ] && ! jq -e . "$USER_DB_FILE" >/dev/null 2>&1; then
+    backup_corrupt_json_file "$USER_DB_FILE"
+  fi
+  user_db_min_template
 }
 
 user_db_save() {
@@ -58,7 +61,7 @@ _user_db_touch_data_updated_at_body() {
   local db_json now_text
   db_json="$(user_db_load)"
   now_text="$(date '+%Y-%m-%d %H:%M:%S')"
-  db_json="$(echo "$db_json" | jq --arg now "$now_text" '
+  db_json="$(printf '%s\n' "$db_json" | jq --arg now "$now_text" '
     .meta = (.meta // {})
     | .meta.data_updated_at_text = $now
   ')" || return 1
@@ -67,21 +70,8 @@ _user_db_touch_data_updated_at_body() {
 
 _user_db_save_body() {
   local db_json="$1"
-  mkdir -p "$(dirname "$USER_DB_FILE")" /etc/sing-box
-  chmod 700 "$(dirname "$USER_DB_FILE")" 2>/dev/null || true
-  local tmp_file
-  tmp_file="$(mktemp "${USER_DB_FILE}.tmp.XXXXXX")" || return 1
-  if echo "$db_json" | jq . > "$tmp_file"; then
-    if ! mv -f "$tmp_file" "$USER_DB_FILE"; then
-      err "用户数据库写入失败：$USER_DB_FILE"
-      rm -f "$tmp_file" >/dev/null 2>&1 || true
-      return 1
-    fi
-    chmod 600 "$USER_DB_FILE" 2>/dev/null || true
-  else
-    rm -f "$tmp_file"
-    return 1
-  fi
+  mkdir -p /etc/sing-box 2>/dev/null || true
+  atomic_write_json_file "$USER_DB_FILE" "$db_json" "用户数据库"
 }
 
 user_billable_bytes() {

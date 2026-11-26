@@ -438,21 +438,6 @@ build_socks_inbound() {
   '
 }
 
-# ---------- 证书清理 ----------
-
-cleanup_inbound_generated_cert_files() {
-  local json="$1" entry_key="$2"
-  local crt key
-  crt="$(echo "$json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.certificate_path // empty' | head -n1)"
-  key="$(echo "$json" | jq -r --arg ek "$entry_key" '.inbounds[]? | select((.tag // "") == $ek) | .tls.key_path // empty' | head -n1)"
-  if [ -n "$crt" ] && [[ "$crt" == /etc/sing-box/* ]]; then
-    rm -f "$crt" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$key" ] && [[ "$key" == /etc/sing-box/* ]]; then
-    rm -f "$key" >/dev/null 2>&1 || true
-  fi
-}
-
 # ---------- 用户对象构建（按协议类型分派） ----------
 
 build_user_object_from_inbound() {

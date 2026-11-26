@@ -111,29 +111,27 @@ config_migrate_114() {
 }
 
 config_load() {
-  if [ -s "$CONFIG_FILE" ] && jq -e . "$CONFIG_FILE" >/dev/null 2>&1; then
-    config_normalize "$(cat "$CONFIG_FILE")"
-  else
-    config_min_template | config_migrate_114
+  if [ -s "$CONFIG_FILE" ]; then
+    if jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1; then
+      config_normalize "$(cat "$CONFIG_FILE")"
+      return 0
+    fi
+    backup_corrupt_json_file "$CONFIG_FILE"
   fi
+  config_min_template | config_migrate_114
 }
 
 config_ensure_exists() {
   mkdir -p /etc/sing-box
   chmod 700 /etc/sing-box 2>/dev/null || true
   if [ ! -e "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
-    warn "未发现配置文件，将写入最小模板：$CONFIG_FILE"
     config_min_template | config_migrate_114 > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0
   fi
 
-  if ! jq -e . "$CONFIG_FILE" >/dev/null 2>&1; then
-    local ts broken
-    ts="$(date +%Y%m%d_%H%M%S)"
-    broken="${CONFIG_FILE}.broken.${ts}"
-    cp -a "$CONFIG_FILE" "$broken" 2>/dev/null || true
-    warn "检测到配置文件不是合法 JSON，已备份到：$broken"
+  if ! jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1; then
+    backup_corrupt_json_file "$CONFIG_FILE"
     config_min_template | config_migrate_114 > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     return 0

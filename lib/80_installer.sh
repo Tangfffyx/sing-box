@@ -45,8 +45,6 @@ version_ge() {
   '
 }
 
-ensure_sagernet_repo() { :; }
-
 # ---------- 版本管理 ----------
 
 get_release_latest_tag() {
@@ -343,11 +341,8 @@ _remove_cron_job() {
   rm -f "$tmp"
 }
 
-install_log_maintain_cron() { _install_cron_job "$LOG_MAINTAIN_CRON_MARK" "$LOG_MAINTAIN_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --maintain-logs"; }
-remove_log_maintain_cron()  { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
-install_user_watch_cron()   { _install_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --user-watch"; }
-remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
-install_upstream_refresh_cron() { _install_cron_job "$UPSTREAM_REFRESH_CRON_MARK" "$UPSTREAM_REFRESH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --refresh-upstream"; }
+remove_log_maintain_cron()      { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
+remove_user_watch_cron()        { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
 remove_upstream_refresh_cron()  { _remove_cron_job "$UPSTREAM_REFRESH_CRON_MARK"; }
 install_periodic_sync_cron()    { _install_cron_job "$PERIODIC_SYNC_CRON_MARK" "$PERIODIC_SYNC_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --periodic-sync"; }
 remove_periodic_sync_cron()     { _remove_cron_job "$PERIODIC_SYNC_CRON_MARK"; }
