@@ -441,10 +441,10 @@ protocol_install_menu() {
           param_echo "混淆类型" "$obfs_type"
           param_echo "混淆密码" "$obfs_pass"
         fi
-        # 端口跳跃：默认开，范围默认 30000-40000；sing-box 只监听 UDP 443，跳跃靠防火墙重定向。
+        # 端口跳跃：默认开，范围默认 42310-45545；sing-box 只监听 UDP 443，跳跃靠防火墙重定向。
         hop_enabled=1
         hop_start="$HY2_HOP_DEFAULT_START"; hop_end="$HY2_HOP_DEFAULT_END"
-        read -r -p "启用端口跳跃（默认开，范围 ${hop_start}-${hop_end}，输入 n 关闭，回车默认开）: " hop_answer
+        read -r -p "启用端口跳跃（默认开，输入 n 关闭，回车默认开）: " hop_answer
         if [[ "${hop_answer:-}" =~ ^[Nn]$ ]]; then
           hop_enabled=0
         else
@@ -452,7 +452,7 @@ protocol_install_menu() {
             read -r -p "端口跳跃范围 (默认: ${hop_start}-${hop_end}，回车用默认): " hop_range
             hop_range="${hop_range:-${hop_start}-${hop_end}}"
             if ! hy2_parse_hop_range "$hop_range"; then
-              warn "范围格式不对，应为 起始-结束，如 30000-40000。"
+              warn "范围格式不对，应为 起始-结束，如 42310-45545。"
               continue
             fi
             hop_start="$_HOP_START"; hop_end="$_HOP_END"
@@ -643,8 +643,12 @@ protocol_install_menu() {
       if [ -n "$_hy2_new" ]; then
         hy2_parse_hop_range "$_hy2_new" || continue
         if hy2_hop_apply "$_HOP_START" "$_HOP_END" "$_hy2_port"; then
-          ok "端口跳跃已启用：UDP ${_HOP_START}-${_HOP_END} -> ${_hy2_port}（${_hy2_tag}）。"
-          say "云安全组还需放行 UDP ${_HOP_START}-${_HOP_END} 和 UDP ${_hy2_port}，脚本无法代劳。"
+          if hy2_hop_rule_verified "$_HOP_START" "$_HOP_END" "$_hy2_port"; then
+            ok "端口跳跃已启用：UDP ${_HOP_START}-${_HOP_END} -> ${_hy2_port}（${_hy2_tag}）。"
+            say "云安全组还需放行 UDP ${_HOP_START}-${_HOP_END} 和 UDP ${_hy2_port}，脚本无法代劳。"
+          else
+            warn "端口跳跃重定向已执行，但验证未通过（防火墙里查不到 UDP ${_HOP_START}-${_HOP_END} -> ${_hy2_port} 的规则），请手动检查 iptables 后重试。"
+          fi
         else
           warn "端口跳跃重定向设置失败（${_hy2_tag}）：配置已保存但跳跃未生效，已清理该节点的跳跃记录，可手动执行 iptables 重定向后重新安装。"
           _hy2_meta_now="$(meta_load 2>/dev/null)" || _hy2_meta_now='{}'
@@ -671,6 +675,10 @@ protocol_install_menu() {
         fi
       fi
     done
+    # 同步开机自恢复服务：还有跳跃范围就确保装好，一个不剩就拆掉。
+    if [ ${#hy2_meta_tags[@]} -gt 0 ]; then
+      hy2_hop_restore_sync || warn "开机自恢复服务同步失败：重启后跳跃规则可能丢失，请手动检查。"
+    fi
   fi
   pause
   return 0
@@ -775,6 +783,8 @@ protocol_remove_menu() {
     if [ "$_hop_meta_new" != "$_remove_meta" ]; then
       meta_save "$_hop_meta_new" || warn "Hysteria2 跳跃记录清理失败，请手动检查 meta.json。"
     fi
+    # 没有跳跃范围剩下时，顺带拆掉开机自恢复服务。
+    hy2_hop_restore_sync || warn "开机自恢复服务同步失败，请手动检查。"
   fi
   [ "$_apply_ok" -eq 1 ] && ok "协议已卸载。"
   pause
@@ -853,6 +863,8 @@ clear_config_json() {
       if [ "$_clear_new_meta" != "$_clear_meta" ]; then
         meta_save "$_clear_new_meta" || warn "Hysteria2 跳跃记录清理失败，请手动检查 meta.json。"
       fi
+      # 所有 hy2 节点都清掉了，顺带拆掉开机自恢复服务。
+      hy2_hop_restore_sync || warn "开机自恢复服务同步失败，请手动检查。"
     fi
   else
     err "配置或分流状态清空失败。"

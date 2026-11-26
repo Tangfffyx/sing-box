@@ -25,7 +25,7 @@ wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh &&
 需要 sing-box **1.14.0 或更新版本**（Gecko 混淆需要 1.14.0+）。
 
 - 新增 Hysteria2 入站，安装菜单第 3 位：自签证书（`hy2-<端口>.crt/.key`）、认证密码与混淆密码分开、混淆默认 Gecko（安装时可切 Salamander 或不启用）、带宽不限。
-- 端口跳跃默认范围 30000-40000（安装时可改）：sing-box 只监听 UDP 443，脚本用 iptables/ip6tables 把该段 UDP 端口重定向到 443（先查后加，持久化保存）；跳跃范围存在 meta.json，按 `hy2-<端口>` 记；卸载/清空配置时，没有其它节点在用就删规则。云安全组仍需手动放行 UDP 30000-40000 和 UDP 443。
+- 端口跳跃默认范围 42310-45545（安装时可改）：sing-box 只监听 UDP 443，脚本用 iptables/ip6tables 把该段 UDP 端口重定向到 443（先查后加，持久化保存）；跳跃范围存在 meta.json，按 `hy2-<端口>` 记；卸载/清空配置时，没有其它节点在用就删规则。云安全组仍需手动放行 UDP 42310-45545 和 UDP 443。
 - 导出增加 Hysteria2：Clash、Quantumult X（`port-hopping`、`gecko-password`/`salamander-password`）和通用 `hysteria2://` 链接。
 - 代码优化：安装菜单 9 个协议共用选端口/写入配置助手、TLS 自签证书共用助手、协议排序由注册表派生（不再硬编码序号），行为不变。
 

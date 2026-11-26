@@ -1881,8 +1881,8 @@ port_conflict_for_protocol() {
 # 跳跃范围存在 meta.json（config.json 没有这个字段），按 entry_key 记，如 hy2-443。
 # ====================================================
 
-HY2_HOP_DEFAULT_START=30000
-HY2_HOP_DEFAULT_END=40000
+HY2_HOP_DEFAULT_START=42310
+HY2_HOP_DEFAULT_END=45545
 
 hy2_hop_range_valid() {
   local start="$1" end="$2" listen_port="$3"
@@ -1893,7 +1893,7 @@ hy2_hop_range_valid() {
   return 0
 }
 
-# 解析 "30000-40000" 为 _HOP_START/_HOP_END，格式不对返回 1。
+# 解析 "42310-45545" 为 _HOP_START/_HOP_END，格式不对返回 1。
 hy2_parse_hop_range() {
   local range="${1:-}"
   [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]] || return 1
@@ -1950,28 +1950,44 @@ hy2_hop_apply_nft() {
   nft add rule ip nat prerouting udp dport "${start}-${end}" redirect to ":${port}" || return 1
 }
 
-# 持久化重定向规则：只用已装好的工具保存，不自动装包；
-# 保存不了返回 1，由调用方明确提醒用户手动保存，不悄悄跳过。
+# 最近一次 hy2_hop_persist 失败的原因（成功时为空），供调用方在警告里具体说明。
+_HY2_PERSIST_FAIL=""
+
+# 持久化重定向规则：只用已装好的工具保存，不自动装包（不装 iptables-persistent）；
+# 保存不了返回 1，并把原因记在 _HY2_PERSIST_FAIL 里，由调用方明确提醒用户手动保存，不悄悄跳过。
+# 注意：只写 /etc/iptables/rules.v4 并不能保证开机自动恢复（没装 iptables-persistent
+# 的系统开机时没人读这个文件）；开机恢复靠下面的 hy2_hop_restore_* 服务/cron。
 hy2_hop_persist() {
+  _HY2_PERSIST_FAIL=""
   if has_cmd netfilter-persistent; then
-    netfilter-persistent save >/dev/null 2>&1 && return 0
-  fi
-  if has_cmd iptables-save && [ -d /etc/iptables ]; then
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || return 1
-    if has_cmd ip6tables-save; then ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true; fi
-    return 0
+    if netfilter-persistent save >/dev/null 2>&1; then return 0; fi
+    _HY2_PERSIST_FAIL="netfilter-persistent save 执行失败"
+  else
+    _HY2_PERSIST_FAIL="未安装 iptables-persistent（没有 netfilter-persistent 命令）"
   fi
   if [ "$PKG_MANAGER" = "apk" ] && has_cmd iptables-save; then
     # Alpine OpenRC 的 iptables 服务从 /etc/iptables/rules-save 恢复
-    mkdir -p /etc/iptables 2>/dev/null || return 1
-    iptables-save > /etc/iptables/rules-save 2>/dev/null
-    return $?
+    if mkdir -p /etc/iptables 2>/dev/null && iptables-save > /etc/iptables/rules-save 2>/dev/null; then
+      return 0
+    fi
+    _HY2_PERSIST_FAIL="iptables-save 写入 /etc/iptables/rules-save 失败"
+    return 1
   fi
+  if has_cmd iptables-save; then
+    # 新装系统常没有 /etc/iptables 目录：自己建目录再保存，不装任何包。
+    if mkdir -p /etc/iptables 2>/dev/null && iptables-save > /etc/iptables/rules.v4 2>/dev/null; then
+      if has_cmd ip6tables-save; then ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true; fi
+      return 0
+    fi
+    _HY2_PERSIST_FAIL="无法创建 /etc/iptables 或 iptables-save 执行失败"
+    return 1
+  fi
+  _HY2_PERSIST_FAIL="本机没有 iptables-save 可用"
   return 1
 }
 
-# 应用端口跳跃重定向（先查后加，重装不重复）。持久化失败只警告，不回滚已生效的规则。
-hy2_hop_apply() {
+# 只加规则（先查后加，不持久化），供 hy2_hop_apply 与开机恢复共用。
+_hy2_hop_add_rule() {
   local start="$1" end="$2" port="$3"
   local applied=0
   if has_cmd iptables; then
@@ -1994,8 +2010,36 @@ hy2_hop_apply() {
       return 1
     fi
   fi
+  return 0
+}
+
+# 验证规则确实在防火墙里（安装后立即核对，不只信“执行成功”）。
+# 有 iptables 就要求 v4 规则在，有 ip6tables 就要求 v6 规则也在；只有 nft 时查 ruleset。
+hy2_hop_rule_verified() {
+  local start="$1" end="$2" port="$3"
+  if has_cmd iptables || has_cmd ip6tables; then
+    if has_cmd iptables && ! hy2_hop_rule_present iptables "$start" "$end" "$port"; then return 1; fi
+    if has_cmd ip6tables && ! hy2_hop_rule_present ip6tables "$start" "$end" "$port"; then return 1; fi
+    return 0
+  fi
+  if has_cmd nft; then
+    nft list ruleset 2>/dev/null | grep -Fq "udp dport ${start}-${end} redirect to :${port}"
+    return $?
+  fi
+  return 1
+}
+
+# 应用端口跳跃重定向（先查后加，重装不重复）。持久化失败只警告，不回滚已生效的规则；
+# 持久化失败时尽量装好开机自恢复服务，重启后规则能自动补回。
+hy2_hop_apply() {
+  local start="$1" end="$2" port="$3"
+  _hy2_hop_add_rule "$start" "$end" "$port" || return 1
   if ! hy2_hop_persist; then
-    warn "端口跳跃规则已生效，但持久化失败：重启后规则会丢失。请手动保存，例如 Debian/Ubuntu：apt install -y iptables-persistent && netfilter-persistent save。"
+    if hy2_hop_restore_sync 2>/dev/null; then
+      warn "端口跳跃规则已生效，但持久化保存失败（${_HY2_PERSIST_FAIL}）。已安装开机自恢复服务，重启后会自动补回规则；也可手动保存，例如 Debian/Ubuntu：apt install -y iptables-persistent && netfilter-persistent save。"
+    else
+      warn "端口跳跃规则已生效，但持久化失败（${_HY2_PERSIST_FAIL}），且开机自恢复服务未能安装：重启后规则会丢失。请手动保存，例如 Debian/Ubuntu：apt install -y iptables-persistent && netfilter-persistent save。"
+    fi
   fi
   return 0
 }
@@ -2012,8 +2056,130 @@ hy2_hop_remove() {
   if ! has_cmd iptables && ! has_cmd ip6tables && has_cmd nft; then
     warn "本机只有 nft 可用，跳跃规则需手动删除：nft delete rule ip nat prerouting udp dport ${start}-${end} redirect to :${port}（按 handle 删除更稳妥）。"
   fi
-  hy2_hop_persist || warn "端口跳跃规则已删除，但持久化更新失败，重启后旧规则可能恢复，请手动保存。"
+  hy2_hop_persist || warn "端口跳跃规则已删除，但持久化更新失败（${_HY2_PERSIST_FAIL}），重启后旧规则可能恢复，请手动保存。"
   return 0
+}
+
+# ====================================================
+# Hysteria2 端口跳跃：开机自恢复（方案 B，不装 iptables-persistent）
+# 原理：规则只在内存里，重启会丢。服务/cron 在开机时读 meta.json，
+# 把每个 hy2 节点存的跳跃范围重新加回防火墙。服务由脚本自己建、
+# 卸载时自己拆，不动系统包。
+# ====================================================
+
+HY2_HOP_RESTORE_SERVICE="/etc/systemd/system/sing-box-hy2-hop-restore.service"
+HY2_HOP_RESTORE_CRON_MARK="sing-box-hy2-hop-restore"
+
+# meta 里是否还有任何 hy2 节点的跳跃范围。
+hy2_hop_has_any_range() {
+  local meta_json="${1:-}"
+  [ -n "$meta_json" ] || meta_json='{}'
+  echo "$meta_json" | jq -e '
+    [ to_entries[]
+      | select(.key | startswith("hy2-"))
+      | select(.value.hop_start != null and .value.hop_end != null) ] | length > 0' >/dev/null 2>&1
+}
+
+# 开机恢复入口（sb.sh --restore-hy2-hops 调用）：按 meta 把所有跳跃规则补回来。
+# 不调持久化——恢复本身就是持久化的手段；失败返回 1 供 systemd/cron 日志查看。
+hy2_hop_restore_all() {
+  local meta_json
+  meta_json="$(meta_load 2>/dev/null)" || meta_json='{}'
+  [ -n "$meta_json" ] || meta_json='{}'
+  local _ok=0 _tag _start _end _port
+  while IFS=' ' read -r _tag _start _end; do
+    [ -n "$_tag" ] || continue
+    _port="$(entry_key_to_port "$_tag")"
+    if ! hy2_hop_range_valid "$_start" "$_end" "$_port" 2>/dev/null; then
+      warn "开机恢复跳过无效的跳跃范围：${_tag} ${_start}-${_end}。"
+      _ok=1
+      continue
+    fi
+    if ! _hy2_hop_add_rule "$_start" "$_end" "$_port"; then
+      warn "开机恢复跳跃规则失败：${_tag} UDP ${_start}-${_end} -> ${_port}。"
+      _ok=1
+    fi
+  done <<EOF
+$(echo "$meta_json" | jq -r 'to_entries[] | select(.key | startswith("hy2-")) | select(.value.hop_start != null and .value.hop_end != null) | "\(.key) \(.value.hop_start) \(.value.hop_end)"' 2>/dev/null)
+EOF
+  return $_ok
+}
+
+_hy2_hop_restore_service_installed() {
+  [ -f "$HY2_HOP_RESTORE_SERVICE" ] && grep -Fq -- "--restore-hy2-hops" "$HY2_HOP_RESTORE_SERVICE" 2>/dev/null
+}
+
+_hy2_hop_restore_cron_installed() {
+  has_cmd crontab || return 1
+  crontab -l 2>/dev/null | grep -Fq "$HY2_HOP_RESTORE_CRON_MARK"
+}
+
+# 装开机恢复：优先 systemd oneshot 服务；没有 systemd 时退到 @reboot cron；
+# 两者都没有则返回 1，由调用方提醒用户手动处理。
+hy2_hop_restore_install() {
+  if _hy2_hop_restore_service_installed || _hy2_hop_restore_cron_installed; then return 0; fi
+  if has_cmd systemctl && [ -d /run/systemd/system ]; then
+    mkdir -p /etc/systemd/system || return 1
+    cat > "$HY2_HOP_RESTORE_SERVICE" <<EOF
+[Unit]
+Description=Restore Hysteria2 port hopping iptables rules
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=/bin/bash ${SB_TARGET_SCRIPT} --restore-hy2-hops
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable sing-box-hy2-hop-restore.service >/dev/null 2>&1 || return 1
+    _hy2_hop_restore_service_installed
+    return $?
+  fi
+  if has_cmd crontab; then
+    local tmp
+    tmp="$(mktemp)" || return 1
+    crontab -l 2>/dev/null | grep -v "$HY2_HOP_RESTORE_CRON_MARK" > "$tmp" || true
+    echo "@reboot /bin/bash ${SB_TARGET_SCRIPT} --restore-hy2-hops >/dev/null 2>&1 # ${HY2_HOP_RESTORE_CRON_MARK}" >> "$tmp"
+    crontab "$tmp" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+    _hy2_hop_restore_cron_installed
+    return $?
+  fi
+  return 1
+}
+
+# 拆开机恢复（服务和 cron 都清，只在没有跳跃范围剩下时调用）。
+hy2_hop_restore_remove() {
+  if [ -f "$HY2_HOP_RESTORE_SERVICE" ]; then
+    systemctl disable --now sing-box-hy2-hop-restore.service >/dev/null 2>&1 || true
+    rm -f "$HY2_HOP_RESTORE_SERVICE" || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  if has_cmd crontab; then
+    local tmp
+    tmp="$(mktemp)" || return 0
+    crontab -l 2>/dev/null | grep -v "$HY2_HOP_RESTORE_CRON_MARK" > "$tmp" || true
+    if [ -s "$tmp" ]; then
+      crontab "$tmp" || true
+    else
+      crontab -r 2>/dev/null || true
+    fi
+    rm -f "$tmp"
+  fi
+  return 0
+}
+
+# 按 meta 现状同步开机恢复：还有跳跃范围就确保装好，一个不剩就拆掉。
+hy2_hop_restore_sync() {
+  local meta_json
+  meta_json="$(meta_load 2>/dev/null)" || meta_json='{}'
+  [ -n "$meta_json" ] || meta_json='{}'
+  if hy2_hop_has_any_range "$meta_json"; then
+    hy2_hop_restore_install
+  else
+    hy2_hop_restore_remove
+  fi
 }
 
 find_inbound_by_entry_key() {
@@ -8084,12 +8250,12 @@ build_v2rayn_hysteria2_link() {
   fi
   # 认证密码不做 url_encode：与 AnyTLS 链接同理，客户端不对 userinfo 做 URL 解码，
   # base64 字符集（A-Za-z0-9+/=）在 userinfo 中无歧义，可直接使用。
-  # port 可能是单个端口（443）或跳跃范围（30000-40000），由调用方决定。
+  # port 可能是单个端口（443）或跳跃范围（42310-45545），由调用方决定。
   printf 'hysteria2://%s@%s:%s/?%s#%s' \
     "$password" "$server" "$port" "$query" "$(url_encode "$name")"
 }
 
-# 从 meta 取某 hy2 节点的跳跃范围 "30000-40000"，没有返回空。
+# 从 meta 取某 hy2 节点的跳跃范围 "42310-45545"，没有返回空。
 hy2_export_hop_range() {
   local tag="$1"
   hy2_hop_range_from_meta "$(meta_load 2>/dev/null)" "$tag"
@@ -8275,7 +8441,7 @@ export_configs() {
             # QX：基础端口就是监听端口，跳跃范围单独用 port-hopping 写
             qx_line=" Quantumult X: hysteria2=${ip}:${port}, password=${pass}, tls-host=${sni}, tls-verification=false, udp-relay=true"
             if [ -n "$hop_range" ]; then
-              qx_line="${qx_line}, port-hopping=${hop_range}"
+              qx_line="${qx_line}, port-hopping=${hop_range}, port-hopping-interval=30"
             fi
             if [ "$obfs_type" = "gecko" ]; then
               qx_line="${qx_line}, gecko-password=${obfs_pass}"
@@ -9783,10 +9949,10 @@ protocol_install_menu() {
           param_echo "混淆类型" "$obfs_type"
           param_echo "混淆密码" "$obfs_pass"
         fi
-        # 端口跳跃：默认开，范围默认 30000-40000；sing-box 只监听 UDP 443，跳跃靠防火墙重定向。
+        # 端口跳跃：默认开，范围默认 42310-45545；sing-box 只监听 UDP 443，跳跃靠防火墙重定向。
         hop_enabled=1
         hop_start="$HY2_HOP_DEFAULT_START"; hop_end="$HY2_HOP_DEFAULT_END"
-        read -r -p "启用端口跳跃（默认开，范围 ${hop_start}-${hop_end}，输入 n 关闭，回车默认开）: " hop_answer
+        read -r -p "启用端口跳跃（默认开，输入 n 关闭，回车默认开）: " hop_answer
         if [[ "${hop_answer:-}" =~ ^[Nn]$ ]]; then
           hop_enabled=0
         else
@@ -9794,7 +9960,7 @@ protocol_install_menu() {
             read -r -p "端口跳跃范围 (默认: ${hop_start}-${hop_end}，回车用默认): " hop_range
             hop_range="${hop_range:-${hop_start}-${hop_end}}"
             if ! hy2_parse_hop_range "$hop_range"; then
-              warn "范围格式不对，应为 起始-结束，如 30000-40000。"
+              warn "范围格式不对，应为 起始-结束，如 42310-45545。"
               continue
             fi
             hop_start="$_HOP_START"; hop_end="$_HOP_END"
@@ -9985,8 +10151,12 @@ protocol_install_menu() {
       if [ -n "$_hy2_new" ]; then
         hy2_parse_hop_range "$_hy2_new" || continue
         if hy2_hop_apply "$_HOP_START" "$_HOP_END" "$_hy2_port"; then
-          ok "端口跳跃已启用：UDP ${_HOP_START}-${_HOP_END} -> ${_hy2_port}（${_hy2_tag}）。"
-          say "云安全组还需放行 UDP ${_HOP_START}-${_HOP_END} 和 UDP ${_hy2_port}，脚本无法代劳。"
+          if hy2_hop_rule_verified "$_HOP_START" "$_HOP_END" "$_hy2_port"; then
+            ok "端口跳跃已启用：UDP ${_HOP_START}-${_HOP_END} -> ${_hy2_port}（${_hy2_tag}）。"
+            say "云安全组还需放行 UDP ${_HOP_START}-${_HOP_END} 和 UDP ${_hy2_port}，脚本无法代劳。"
+          else
+            warn "端口跳跃重定向已执行，但验证未通过（防火墙里查不到 UDP ${_HOP_START}-${_HOP_END} -> ${_hy2_port} 的规则），请手动检查 iptables 后重试。"
+          fi
         else
           warn "端口跳跃重定向设置失败（${_hy2_tag}）：配置已保存但跳跃未生效，已清理该节点的跳跃记录，可手动执行 iptables 重定向后重新安装。"
           _hy2_meta_now="$(meta_load 2>/dev/null)" || _hy2_meta_now='{}'
@@ -10013,6 +10183,10 @@ protocol_install_menu() {
         fi
       fi
     done
+    # 同步开机自恢复服务：还有跳跃范围就确保装好，一个不剩就拆掉。
+    if [ ${#hy2_meta_tags[@]} -gt 0 ]; then
+      hy2_hop_restore_sync || warn "开机自恢复服务同步失败：重启后跳跃规则可能丢失，请手动检查。"
+    fi
   fi
   pause
   return 0
@@ -10117,6 +10291,8 @@ protocol_remove_menu() {
     if [ "$_hop_meta_new" != "$_remove_meta" ]; then
       meta_save "$_hop_meta_new" || warn "Hysteria2 跳跃记录清理失败，请手动检查 meta.json。"
     fi
+    # 没有跳跃范围剩下时，顺带拆掉开机自恢复服务。
+    hy2_hop_restore_sync || warn "开机自恢复服务同步失败，请手动检查。"
   fi
   [ "$_apply_ok" -eq 1 ] && ok "协议已卸载。"
   pause
@@ -10195,6 +10371,8 @@ clear_config_json() {
       if [ "$_clear_new_meta" != "$_clear_meta" ]; then
         meta_save "$_clear_new_meta" || warn "Hysteria2 跳跃记录清理失败，请手动检查 meta.json。"
       fi
+      # 所有 hy2 节点都清掉了，顺带拆掉开机自恢复服务。
+      hy2_hop_restore_sync || warn "开机自恢复服务同步失败，请手动检查。"
     fi
   else
     err "配置或分流状态清空失败。"
@@ -10433,6 +10611,12 @@ fi
 if [[ "${1:-}" == "--user-watch" ]] || [[ "${1:-}" == "--maintain-logs" ]] || \
    [[ "${1:-}" == "--tg-agent-sync" ]] || [[ "${1:-}" == "--refresh-upstream" ]]; then
   exit 0
+fi
+
+# 开机恢复 Hysteria2 端口跳跃规则（systemd 服务 / @reboot cron 调用，无交互）。
+if [[ "${1:-}" == "--restore-hy2-hops" ]]; then
+  hy2_hop_restore_all
+  exit $?
 fi
 
 main_menu

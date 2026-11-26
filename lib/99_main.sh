@@ -59,4 +59,10 @@ if [[ "${1:-}" == "--user-watch" ]] || [[ "${1:-}" == "--maintain-logs" ]] || \
   exit 0
 fi
 
+# 开机恢复 Hysteria2 端口跳跃规则（systemd 服务 / @reboot cron 调用，无交互）。
+if [[ "${1:-}" == "--restore-hy2-hops" ]]; then
+  hy2_hop_restore_all
+  exit $?
+fi
+
 main_menu

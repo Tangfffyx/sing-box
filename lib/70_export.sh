@@ -106,12 +106,12 @@ build_v2rayn_hysteria2_link() {
   fi
   # 认证密码不做 url_encode：与 AnyTLS 链接同理，客户端不对 userinfo 做 URL 解码，
   # base64 字符集（A-Za-z0-9+/=）在 userinfo 中无歧义，可直接使用。
-  # port 可能是单个端口（443）或跳跃范围（30000-40000），由调用方决定。
+  # port 可能是单个端口（443）或跳跃范围（42310-45545），由调用方决定。
   printf 'hysteria2://%s@%s:%s/?%s#%s' \
     "$password" "$server" "$port" "$query" "$(url_encode "$name")"
 }
 
-# 从 meta 取某 hy2 节点的跳跃范围 "30000-40000"，没有返回空。
+# 从 meta 取某 hy2 节点的跳跃范围 "42310-45545"，没有返回空。
 hy2_export_hop_range() {
   local tag="$1"
   hy2_hop_range_from_meta "$(meta_load 2>/dev/null)" "$tag"
@@ -297,7 +297,7 @@ export_configs() {
             # QX：基础端口就是监听端口，跳跃范围单独用 port-hopping 写
             qx_line=" Quantumult X: hysteria2=${ip}:${port}, password=${pass}, tls-host=${sni}, tls-verification=false, udp-relay=true"
             if [ -n "$hop_range" ]; then
-              qx_line="${qx_line}, port-hopping=${hop_range}"
+              qx_line="${qx_line}, port-hopping=${hop_range}, port-hopping-interval=30"
             fi
             if [ "$obfs_type" = "gecko" ]; then
               qx_line="${qx_line}, gecko-password=${obfs_pass}"
