@@ -38,7 +38,7 @@ jobs:
           go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3
       - name: Real core loopback smoke test
         run: bash tests/core-smoke.sh "$RUNNER_TEMP/sing-box" "$(go env GOPATH)/bin/grpcurl"
-      - name: All eight protocols TCP/UDP and user permissions
+      - name: All nine protocols TCP/UDP and user permissions
         run: |
           export PATH="$RUNNER_TEMP:$PATH"
           SB_TEST_CORE="$RUNNER_TEMP/sing-box" python3 tests/protocol-smoke.py
