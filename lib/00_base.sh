@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.2.0"
+SCRIPT_VERSION="7.0.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -52,15 +52,97 @@ BUSINESS_TZ="Asia/Shanghai"
 
 # -------------------- 颜色 --------------------
 B='\033[1;34m'; G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'
-C='\033[1;36m'; NC='\033[0m'; W='\033[1;37m'
+C='\033[1;36m'; NC='\033[0m'; W='\033[1;37m'; D='\033[2m'
 
 # -------------------- 日志/UI 函数 --------------------
-say()  { echo -e "${C}[INFO]${NC} $*"; }
-ok()   { echo -e "${G}[ OK ]${NC} $*"; }
-warn() { echo -e "${Y}[WARN]${NC} $*" >&2; }
-err()  { echo -e "${R}[ERR ]${NC} $*" >&2; }
+say()  { echo -e "${C}•${NC} $*"; }
+ok()   { echo -e "${G}✓${NC} $*"; }
+warn() { echo -e "${Y}!${NC} $*" >&2; }
+err()  { echo -e "${R}✗${NC} $*" >&2; }
 pause(){ read -r -n 1 -p "按任意键继续..." || true; echo ""; }
 ui_echo(){ printf '%b\n' "$*" >&2; }
+
+ui_hr() {
+  printf '%b%s%b\n' "$D" "──────────────────────────────────────────────────────" "$NC"
+}
+
+ui_section() {
+  printf '\n  %b%s%b\n' "$W" "$1" "$NC"
+}
+
+# 生成轻量可视化进度条（默认 10 格，如 ████░░░░░░）
+ui_mini_bar() {
+  local percent="${1:-0}" width="${2:-10}" filled empty
+  [[ "$percent" =~ ^[0-9]+$ ]] || percent=0
+  (( percent < 0 )) && percent=0
+  (( percent > 100 )) && percent=100
+  filled=$(( (percent * width + 50) / 100 ))
+  (( filled > width )) && filled=$width
+  empty=$(( width - filled ))
+  local bar_f="" bar_e="" i
+  for ((i=0; i<filled; i++)); do bar_f+="█"; done
+  for ((i=0; i<empty; i++)); do bar_e+="░"; done
+  printf '%s%s' "$bar_f" "$bar_e"
+}
+
+ui_step() {
+  local cur="$1" total="$2" msg="$3"
+  printf '%b[%s/%s]%b %s\n' "$C" "$cur" "$total" "$NC" "$msg"
+}
+
+# 为耗时命令提供旋转进度提示 + 已用秒数，避免假死感。
+# 非交互终端（如 cron/管道/测试）自动降级为直接执行，不输出控制字符。
+run_with_spinner() {
+  local label="$1"
+  shift
+  if [ ! -t 1 ] || [ ! -t 2 ]; then
+    "$@"
+    return $?
+  fi
+
+  local tmp_out pid rc start_ts now_ts elapsed tick=0
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  tmp_out="$(mktemp /tmp/sb-spin.XXXXXX)" || { "$@"; return $?; }
+  start_ts="$(date +%s)"
+
+  "$@" >"$tmp_out" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    now_ts="$(date +%s)"
+    elapsed=$((now_ts - start_ts))
+    if [ "$elapsed" -gt 0 ]; then
+      printf '\r%b%s%b %s %b(%ds)%b\033[K' "$C" "${frames[$((tick % 10))]}" "$NC" "$label" "$D" "$elapsed" "$NC" >&2
+    else
+      printf '\r%b%s%b %s\033[K' "$C" "${frames[$((tick % 10))]}" "$NC" "$label" >&2
+    fi
+    tick=$((tick + 1))
+    sleep 0.12 2>/dev/null || sleep 1
+  done
+
+  if wait "$pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  now_ts="$(date +%s)"
+  elapsed=$((now_ts - start_ts))
+  printf '\r\033[K' >&2
+
+  if [ "$rc" -eq 0 ]; then
+    if [ "$elapsed" -ge 1 ]; then
+      printf '%b✓%b %s %b(%ds)%b\n' "$G" "$NC" "$label" "$D" "$elapsed" "$NC" >&2
+    else
+      printf '%b✓%b %s\n' "$G" "$NC" "$label" >&2
+    fi
+  else
+    printf '%b✗%b %s\n' "$R" "$NC" "$label" >&2
+    if [ -s "$tmp_out" ]; then
+      tail -n 20 "$tmp_out" | sed 's/^/  /' >&2
+    fi
+  fi
+  rm -f "$tmp_out" >/dev/null 2>&1 || true
+  return "$rc"
+}
 
 param_echo() {
   local label="$1" value="$2"
@@ -100,7 +182,7 @@ pad_display_text() {
 
 print_rect_title() {
   local title="$1"
-  local inner_width=46
+  local inner_width=52
   local title_width pad left right line
 
   title_width=$(text_display_width "$title")
@@ -110,11 +192,13 @@ print_rect_title() {
   left=$(( pad / 2 ))
   right=$(( pad - left ))
 
-  line=$(printf '%*s' "$inner_width" '' | tr ' ' '-')
+  line=""
+  local i
+  for ((i=0; i<inner_width; i++)); do line+="─"; done
 
-  printf "%b+%s+%b\n" "$B" "$line" "$NC"
-  printf "%b|%*s%s%*s|%b\n" "$B" "$left" "" "$title" "$right" "" "$NC"
-  printf "%b+%s+%b\n" "$B" "$line" "$NC"
+  printf "%b╭%s╮%b\n" "$C" "$line" "$NC"
+  printf "%b│%b%*s%b%s%b%*s%b│%b\n" "$C" "$NC" "$left" "" "$W" "$title" "$NC" "$right" "" "$C" "$NC"
+  printf "%b╰%s╯%b\n" "$C" "$line" "$NC"
 }
 
 table_compute_widths() {
@@ -169,6 +253,18 @@ declare -A PROTO_PREFIX=(
   [vless-ws]=vless-ws
   [tuic]=tuic
   [socks]=socks
+)
+
+declare -A PROTO_DESC=(
+  [vless-reality]="推荐，免域名抗封锁"
+  [anytls]="轻量抗特征，适合新客户端"
+  [hysteria2]="UDP 加速，适合高丢包线路"
+  [shadowsocks]="SS2022，简单高速"
+  [socks]="SOCKS5 代理，常用于中转落地"
+  [trojan]="经典伪装，兼容性好"
+  [vmess-ws]="配合 CDN / 反代域名使用"
+  [vless-ws]="配合 CDN / 反代域名使用"
+  [tuic]="QUIC 低延迟 UDP 协议"
 )
 
 declare -A PREFIX_TO_PROTO=()

@@ -7,10 +7,7 @@
 
 # ---------- 依赖安装 ----------
 
-ensure_deps_for_installer() {
-  require_root
-  [ "$PKG_MANAGER" = "unknown" ] && { err "未找到受支持的包管理器（apt-get 或 apk）。"; exit 1; }
-  say "安装必要依赖..."
+_install_core_deps_quiet() {
   local _PKG_INSTALL_QUIET=1
   install_pkg curl
   install_pkg jq
@@ -20,6 +17,12 @@ ensure_deps_for_installer() {
     apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip; install_pkg util-linux ;;
     apk) install_pkg ca-certificates; install_pkg gcompat; install_pkg flock ;;
   esac
+}
+
+ensure_deps_for_installer() {
+  require_root
+  [ "$PKG_MANAGER" = "unknown" ] && { err "不支持的系统（仅支持 Debian/Ubuntu 和 Alpine）。"; exit 1; }
+  run_with_spinner "正在检查并安装系统依赖..." _install_core_deps_quiet
 }
 
 version_ge() {
@@ -44,8 +47,6 @@ version_ge() {
     }
   '
 }
-
-ensure_sagernet_repo() { :; }
 
 # ---------- 版本管理 ----------
 
@@ -343,11 +344,8 @@ _remove_cron_job() {
   rm -f "$tmp"
 }
 
-install_log_maintain_cron() { _install_cron_job "$LOG_MAINTAIN_CRON_MARK" "$LOG_MAINTAIN_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --maintain-logs"; }
-remove_log_maintain_cron()  { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
-install_user_watch_cron()   { _install_cron_job "$USER_WATCH_CRON_MARK" "$USER_WATCH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --user-watch"; }
-remove_user_watch_cron()    { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
-install_upstream_refresh_cron() { _install_cron_job "$UPSTREAM_REFRESH_CRON_MARK" "$UPSTREAM_REFRESH_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --refresh-upstream"; }
+remove_log_maintain_cron()      { _remove_cron_job "$LOG_MAINTAIN_CRON_MARK"; }
+remove_user_watch_cron()        { _remove_cron_job "$USER_WATCH_CRON_MARK"; }
 remove_upstream_refresh_cron()  { _remove_cron_job "$UPSTREAM_REFRESH_CRON_MARK"; }
 install_periodic_sync_cron()    { _install_cron_job "$PERIODIC_SYNC_CRON_MARK" "$PERIODIC_SYNC_CRON_SCHEDULE" "bash ${SB_TARGET_SCRIPT} --periodic-sync"; }
 remove_periodic_sync_cron()     { _remove_cron_job "$PERIODIC_SYNC_CRON_MARK"; }
@@ -491,23 +489,35 @@ prepare_script_runtime() {
 
 install_or_update_singbox() {
   clear
-  print_rect_title "sing-box 安装/更新"
+  print_rect_title "安装 / 更新 sing-box"
 
-  ensure_deps_for_installer
+  ui_step 1 5 "准备环境与检查版本"
+  ensure_deps_for_installer || { pause; return 1; }
 
-  local arch file tag latest_ver inst ans tmp_dir base_url download_url sha_url managed_env
+  local arch file tag latest_ver inst tmp_dir base_url download_url sha_url managed_env
   arch="$(uname -m)"
   case "$arch" in
     x86_64) file="sing-box-linux-amd64.tar.gz" ;;
     aarch64|arm64) file="sing-box-linux-arm64.tar.gz" ;;
     *)
-      err "不支持的架构：$arch"
+      err "不支持的 CPU 架构：$arch（仅支持 amd64 / arm64）"
       pause
       return 1
       ;;
   esac
 
-  tag="$(get_release_latest_tag)"
+  local tag_tmp
+  tag_tmp="$(mktemp /tmp/sb-tag.XXXXXX)" || { err "创建临时文件失败。"; pause; return 1; }
+  if ! run_with_spinner "正在查询最新可用版本..." bash -c '
+    curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/'"${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}"'/releases/latest" 2>/dev/null | jq -r ".tag_name // empty" > "'"$tag_tmp"'"
+  '; then
+    rm -f "$tag_tmp"
+    err "获取最新版本失败，请检查服务器网络后再试。"
+    pause
+    return 1
+  fi
+  tag="$(cat "$tag_tmp" 2>/dev/null || true)"
+  rm -f "$tag_tmp"
   latest_ver="$(normalize_release_tag "$tag")"
 
   refresh_command_cache
@@ -519,44 +529,37 @@ install_or_update_singbox() {
   fi
 
   if [ -z "${latest_ver:-}" ]; then
-    err "未获取到 GitHub Release 最新版本。"
+    err "未能获取到最新版本号，请稍后重试。"
     pause
     return 1
   fi
 
   if [ "${managed_env}" != "1" ] && singbox_command_exists; then
-    warn "检测到已有非本脚本安装的 sing-box 环境，请先执行“卸载 sing-box”后再安装。"
+    warn "检测到已有其他方式安装的 sing-box，请先卸载后再使用本脚本安装。"
     pause >&2
     return 0
   fi
 
+  echo ""
   if [ "${managed_env}" = "1" ]; then
-    echo -e "当前版本：${G}${inst:-未知}${NC}"
-    echo -e "最新版本：${G}${latest_ver}${NC}"
+    param_echo "当前版本" "${inst:-未知}"
+    param_echo "最新版本" "${latest_ver}"
+    echo ""
     if [ -n "${inst:-}" ] && version_ge "$inst" "$latest_ver"; then
       if is_install_complete; then
         config_apply "$(config_load)" || { pause; return 1; }
-        ok "当前已是最新版本。"
+        ok "当前已是最新版本，无需更新。"
         pause
         return 0
       fi
-      warn "版本号匹配但部分组件缺失。"
-      read -r -p "是否重新安装以补齐组件？[Y/n]: " ans
-      case "${ans:-Y}" in
-        [Nn]*) return 0 ;;
-      esac
+      warn "版本已是最新，但检测到部分运行组件缺失。"
+      ask_confirm_default_yes "是否立即修复补齐？[Y/n]: " || return 0
     elif [ -n "${inst:-}" ]; then
-      read -r -p "检测到新版本，是否升级？[Y/n]: " ans
-      case "${ans:-Y}" in
-        [Nn]*) return 0 ;;
-      esac
-    else
-      echo -e "当前状态：${Y}本脚本环境，但未识别到已安装版本${NC}"
-      echo -e "将安装版本：${G}${latest_ver}${NC}"
+      ask_confirm_default_yes "发现新版本 ${latest_ver}，是否现在升级？[Y/n]: " || return 0
     fi
   else
-    echo -e "当前状态：${Y}未安装 sing-box${NC}"
-    echo -e "将安装版本：${G}${latest_ver}${NC}"
+    param_echo "准备安装" "sing-box ${latest_ver}（内置流量统计支持）"
+    echo ""
   fi
 
   if [ "${managed_env}" = "1" ] && [ -x "$SINGBOX_BIN" ]; then
@@ -572,87 +575,100 @@ install_or_update_singbox() {
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
 
-  say "下载 sing-box..."
-  if ! download_file "$download_url" "$tmp_dir/$file" 20 3; then
+  ui_step 2 5 "下载 sing-box 内核"
+  if ! download_file "$download_url" "$tmp_dir/$file" 20 3 "下载 sing-box"; then
     rm -rf "$tmp_dir"
-    err "下载失败，请检查网络或稍后重试。"
+    err "内核下载失败，请检查网络连接后重试。"
     pause
     return 1
   fi
 
+  ui_step 3 5 "校验与解压安装包"
   if curl -fsSL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
+    local expected_sha actual_sha
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
     if [ -z "$expected_sha" ] || [ "$expected_sha" != "$actual_sha" ]; then
       rm -rf "$tmp_dir"
-      err "校验失败。"
+      err "安装包校验不通过，文件可能损坏，已取消安装。"
       pause
       return 1
     fi
+    ok "安装包校验通过"
   else
     warn "未获取到校验文件。"
-    if ! ask_confirm_yes "输入 YES 确认跳过校验继续安装，其它任意输入取消: "; then
+    if ! ask_confirm_yn "是否跳过校验继续安装？[y/N]: "; then
       rm -rf "$tmp_dir"
-      err "已取消安装。"
-      pause
-      return 1
+      return 0
     fi
   fi
 
   tar -xzf "$tmp_dir/$file" -C "$tmp_dir" || {
     rm -rf "$tmp_dir"
-    err "解压失败。"
+    err "安装包解压失败。"
     pause
     return 1
   }
 
   [ -f "$tmp_dir/sing-box" ] || {
     rm -rf "$tmp_dir"
-    err "安装包中未找到 sing-box 可执行文件。"
+    err "安装包中未找到 sing-box 主程序。"
     pause
     return 1
   }
 
-  # staging 验证：在替换正式位置之前先验证 with_v2ray_api，避免坏二进制进入 $SINGBOX_BIN
   chmod +x "$tmp_dir/sing-box" 2>/dev/null || true
   if ! "$tmp_dir/sing-box" version 2>/dev/null | grep -q 'with_v2ray_api'; then
     rm -rf "$tmp_dir"
-    err "下载的 sing-box 未检测到 with_v2ray_api。"
+    err "下载的内核不支持流量统计，已取消替换。"
     if [ "$PKG_MANAGER" = "apk" ]; then
-      warn "Alpine 环境提示：若报 'cannot execute' 错误，请手动执行：apk add gcompat"
+      warn "Alpine 系统如果提示无法运行，请先执行：apk add gcompat"
     fi
     pause
     return 1
   fi
 
+  ui_step 4 5 "准备流量统计组件"
   if ! ensure_grpcurl_logged || ! ensure_v2ray_api_proto_files; then
     rm -rf "$tmp_dir"
-    err "统计组件未就绪，已取消升级。"
+    err "流量统计组件准备失败，已取消安装。"
     pause
     return 1
   fi
-  if ! with_manager_lock install_candidate_singbox "$tmp_dir/sing-box" "$tag"; then
+
+  ui_step 5 5 "写入内核并启动服务"
+  if ! run_with_spinner "正在部署内核并验证服务运行..." with_manager_lock install_candidate_singbox "$tmp_dir/sing-box" "$tag"; then
     rm -rf "$tmp_dir"
     pause
     return 1
   fi
   rm -rf "$tmp_dir"
-  # 内核事务已提交；可重试的菜单/cron 初始化不影响已验证的内核。
+
   ensure_sb_shortcut || true
-  ensure_user_manager_ready || warn "用户数据库初始化失败，用户管理菜单进入时会重试初始化。"
-  install_periodic_sync_cron || warn "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
-  install_daily_maintenance_cron || warn "cron 定时任务安装失败：日常维护（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
-  # 清理 6.0.8 及以前残留的 4 个老 cron（墓志铭入口让它们不出错，但应清掉避免无意义触发）
+  ensure_user_manager_ready || warn "用户数据初始化未完成，进入用户管理时会自动重试。"
+  install_periodic_sync_cron || warn "实时同步定时任务未能自动写入，稍后可在“安装与更新”中修复。"
+  install_daily_maintenance_cron || warn "日常维护定时任务未能自动写入，稍后可在“安装与更新”中修复。"
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
   remove_tg_agent_cron || true
   remove_upstream_refresh_cron || true
   refresh_upstream_tag_cache "$tag" >/dev/null 2>&1 || true
-  user_manager_background_sync || warn "用户管理后台同步初始化失败。下次 periodic-sync cron 会重试。"
+  user_manager_background_sync >/dev/null 2>&1 || true
   tg_refresh_after_singbox_install || true
 
-  ok "安装完成。"
-  pause
+  echo ""
+  ok "sing-box ${latest_ver} 安装完成！随时输入 s 可重新打开面板。"
+  local inbound_cnt
+  inbound_cnt="$(config_load 2>/dev/null | jq '.inbounds | length' 2>/dev/null || echo 0)"
+  if [ "${inbound_cnt:-0}" -eq 0 ]; then
+    echo ""
+    if ask_confirm_default_yes "当前还没有任何节点，是否现在添加第一个节点？[Y/n]: "; then
+      protocol_manager || true
+      return 0
+    fi
+  else
+    pause
+  fi
 }
 
 # 调用方持管理锁。候选文件在正式路径之外完成校验；保留最近一次成功版本。
@@ -899,47 +915,18 @@ wireproxy_warp_environment_present() {
   return 1
 }
 
-print_full_cleanup_hint() {
-  echo
-  echo "如需彻底删除脚本与相关配置，可在退出脚本后手动执行："
-  echo "rm -f /root/sb.sh"
-  echo "rm -f /usr/local/bin/s"
-  echo "rm -rf /etc/sing-box-manager"
-  echo "rm -rf /etc/sing-box"
-  echo "rm -rf /var/log/sing-box"
-  echo "rm -f /var/lock/singbox-manager.lock /var/lock/singbox-tg-agent.lock"
-  echo "rm -rf /var/lock/singbox-tg-agent.lock.d"
-}
-
 print_wireproxy_cleanup_hint_if_present() {
   wireproxy_warp_environment_present || return 0
-  echo
-  echo "检测到 WireProxy/WARP 仍存在。"
-  echo
-  echo "如需卸载 WARP，可在退出脚本后执行："
-  echo "wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
-  echo "bash menu.sh u"
+  echo ""
+  warn "检测到外部安装的 WARP（WireProxy）仍在运行，如需一并卸载可执行："
+  echo "  wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh u"
 }
 
-uninstall_singbox_keep_config() {
-  require_root
-  clear
-  print_rect_title "卸载 sing-box"
-  echo "该操作将停止并删除 sing-box 运行组件："
-  echo "  - sing-box 服务"
-  echo "  - sing-box 主程序"
-  echo "  - 流量统计/日志维护定时任务"
-  echo "  - TG Bot 服务与上报任务"
-  echo
-  echo "以下内容会保留："
-  echo "  - sing-box 配置：/etc/sing-box"
-  echo "  - 用户数据与 TG 配置：/etc/sing-box-manager"
-  echo "  - 日志文件：/var/log/sing-box"
-  echo "  - 管理脚本入口：/root/sb.sh、/usr/local/bin/s"
-  echo
-  ask_confirm_yes "输入 YES 确认卸载，其它任意输入取消: " || { warn "已取消卸载。"; pause; return 0; }
-
-  sync_user_usage_counters || true
+_uninstall_core_runtime() {
+  local keep_data="${1:-1}"
+  if [ "$keep_data" = "1" ]; then
+    sync_user_usage_counters || true
+  fi
   remove_periodic_sync_cron || true
   remove_daily_maintenance_cron || true
   remove_user_watch_cron || true
@@ -948,8 +935,14 @@ uninstall_singbox_keep_config() {
   remove_upstream_refresh_cron || true
   rm -f "$UPSTREAM_TAG_CACHE_FILE" >/dev/null 2>&1 || true
   tg_stop_center_service || true
-  tg_mark_disabled_keep_config || true
+  if [ "$keep_data" = "1" ]; then
+    tg_mark_disabled_keep_config || true
+  fi
   remove_all_singbox_service_units
+  # 清理 Hysteria2 端口跳跃防火墙规则与开机自恢复服务
+  if [ "$keep_data" != "1" ]; then
+    hy2_hop_remove_all_from_meta 2>/dev/null || true
+  fi
   # 清理官方包可能创建的系统用户/组
   if has_cmd deluser; then
     deluser --system sing-box >/dev/null 2>&1 || true
@@ -961,14 +954,12 @@ uninstall_singbox_keep_config() {
   else
     groupdel sing-box >/dev/null 2>&1 || true
   fi
-  rm -f "$SINGBOX_BIN" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
-  rm -rf /var/tmp/sb-install.* >/dev/null 2>&1 || true
+  rm -f "$SINGBOX_BIN" "${SINGBOX_BIN}.bak" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
+  rm -rf /var/tmp/sb-install.* /tmp/.sb_pkg_updated >/dev/null 2>&1 || true
   refresh_command_cache
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     case "$PKG_MANAGER" in
       apt)
-        pkg_installed sing-box && apt-get remove -y sing-box >/dev/null 2>&1 || true
-        pkg_installed sing-box-beta && apt-get remove -y sing-box-beta >/dev/null 2>&1 || true
         pkg_installed sing-box && apt-get purge -y sing-box >/dev/null 2>&1 || true
         pkg_installed sing-box-beta && apt-get purge -y sing-box-beta >/dev/null 2>&1 || true
         ;;
@@ -979,8 +970,63 @@ uninstall_singbox_keep_config() {
     esac
   fi
   refresh_command_cache
-  ok "卸载完成，配置和用户数据已保留。"
-  print_full_cleanup_hint
-  print_wireproxy_cleanup_hint_if_present
-  pause
+}
+
+uninstall_singbox_keep_config() {
+  require_root
+  clear
+  print_rect_title "卸载 sing-box"
+  echo ""
+  echo -e "  ${C}1.${NC} 仅卸载程序（保留节点配置与用户数据，方便重装）"
+  echo -e "  ${R}2.${NC} 彻底卸载并清空全部数据（删除配置、用户、日志、防火墙规则与脚本）"
+  echo -e "  ${D}0. 返回上一级${NC}"
+  ui_hr
+  local mode
+  read -r -p "请选择卸载方式（回车返回）: " mode
+  case "${mode:-}" in
+    1)
+      echo ""
+      ask_confirm_yn "确认仅卸载 sing-box 程序并保留配置数据吗？[y/N]: " || return 0
+      run_with_spinner "正在停止服务并卸载程序..." _uninstall_core_runtime 1
+      ok "卸载完成，节点配置与用户数据已保留。"
+      print_wireproxy_cleanup_hint_if_present
+      pause
+      ;;
+    2)
+      echo ""
+      warn "彻底卸载将永久删除所有节点配置、用户与流量记录、TG 配置、日志、端口跳跃规则及本脚本。"
+      ask_confirm_yes "输入 yes 确认彻底卸载（回车取消）: " || return 0
+      run_with_spinner "正在清理服务、防火墙规则与全部数据..." _uninstall_core_runtime 0
+      rm -rf /etc/sing-box /etc/sing-box-manager /var/lib/sing-box /var/log/sing-box \
+             /var/lock/singbox-manager.lock /var/lock/singbox-tg-agent.lock /var/lock/singbox-tg-agent.lock.d \
+             "$SB_SHORTCUT" "$SB_TARGET_SCRIPT" /root/sing-box.sh >/dev/null 2>&1 || true
+      echo ""
+      ok "已彻底卸载并清空所有文件，无需手动清理。"
+      print_wireproxy_cleanup_hint_if_present
+      exit 0
+      ;;
+    ""|0|q|Q) return 0 ;;
+    *) warn "无效选择。"; sleep 1 ;;
+  esac
+}
+
+install_and_uninstall_menu() {
+  while true; do
+    clear
+    print_rect_title "安装 / 更新 / 卸载"
+    singbox_status_summary
+    ui_hr
+    echo -e "  ${C}1.${NC} 安装或更新 sing-box"
+    echo -e "  ${R}2.${NC} 卸载 sing-box"
+    echo -e "  ${D}0. 返回主菜单${NC}"
+    ui_hr
+    local opt
+    read -r -p "请选择操作（回车返回）: " opt
+    case "${opt:-}" in
+      1) install_or_update_singbox || true ;;
+      2) uninstall_singbox_keep_config || true ;;
+      ""|0|q|Q) return 0 ;;
+      *) warn "无效输入：$opt"; sleep 1 ;;
+    esac
+  done
 }

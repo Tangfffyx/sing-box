@@ -208,6 +208,43 @@ test_openrc_restart() {
   reload_or_restart_singbox_safe
 }
 
+test_corrupt_json_backup() {
+  local dir="$TEST_TMP/corrupt"
+  mkdir -p "$dir"
+  CONFIG_FILE="$dir/config.json"
+  META_FILE="$dir/meta.json"
+  USER_DB_FILE="$dir/users.json"
+  SB_LOCK_FILE="$dir/manager.lock"
+  printf '{broken' > "$CONFIG_FILE"
+  printf '{broken' > "$META_FILE"
+  printf '{broken' > "$USER_DB_FILE"
+  config_load >/dev/null 2>&1
+  meta_load >/dev/null 2>&1
+  user_db_load >/dev/null 2>&1
+  [ "$(find "$dir" -maxdepth 1 -name 'config.json.corrupt.*' | wc -l)" -eq 1 ]
+  [ "$(find "$dir" -maxdepth 1 -name 'meta.json.corrupt.*' | wc -l)" -eq 1 ]
+  [ "$(find "$dir" -maxdepth 1 -name 'users.json.corrupt.*' | wc -l)" -eq 1 ]
+  atomic_write_json_file "$META_FILE" '{"ok":true}' "test"
+  assert_json "$(cat "$META_FILE")" '.ok == true'
+  if atomic_write_json_file "$META_FILE" '{invalid' "test" 2>/dev/null; then return 1; fi
+  assert_json "$(cat "$META_FILE")" '.ok == true'
+}
+
+test_ui_helpers_and_split_rules() {
+  local out
+  out="$(run_with_spinner "test task" echo "hello-spinner" 2>&1)"
+  [ "$out" = "hello-spinner" ]
+  if run_with_spinner "fail task" false >/dev/null 2>&1; then return 1; fi
+  [ "$(ui_mini_bar 0 8)" = "░░░░░░░░" ]
+  [ "$(ui_mini_bar 50 8)" = "████░░░░" ]
+  [ "$(ui_mini_bar 120 8)" = "████████" ]
+  source "$ROOT/lib/35_split_rule_conflict.sh"
+  [ "$(split_rule_normalize_file "openai")" = "geosite-openai.srs" ]
+  [ "$(split_rule_normalize_file "geosite-google.srs")" = "geosite-google.srs" ]
+  if split_rule_normalize_file "https://example.com/a.srs" >/dev/null 2>&1; then return 1; fi
+  if split_rule_normalize_file "bad;name" >/dev/null 2>&1; then return 1; fi
+}
+
 run test_routes
 run test_accounting
 run test_user_edits
@@ -217,3 +254,5 @@ run test_ready_and_restart
 run test_install_transaction
 run test_linux_lock_and_process
 run test_openrc_restart
+run test_corrupt_json_backup
+run test_ui_helpers_and_split_rules

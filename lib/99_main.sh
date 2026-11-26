@@ -9,30 +9,37 @@ main_menu() {
   ensure_local_script_entrypoint_once
   while true; do
     clear
-    print_rect_title "Sing-box Elite 管理系统  V${SCRIPT_VERSION}"
-    singbox_status_summary
-    echo -e "${B}--------------------------------------------------------${NC}"
-    echo -e "  ${C}1.${NC} 安装/更新 sing-box"
-    echo -e "  ${C}2.${NC} 系统工具"
-    echo -e "  ${C}3.${NC} 协议管理"
-    echo -e "  ${C}4.${NC} 中转管理"
-    echo -e "  ${C}5.${NC} warp分流"
-    echo -e "  ${C}6.${NC} 导出节点配置"
-    echo -e "  ${C}7.${NC} 用户管理"
-    echo -e "  ${C}8.${NC} 卸载 sing-box"
-    echo -e "  ${R}0.${NC} 退出系统"
-    echo -e "${B}--------------------------------------------------------${NC}"
-    read -r -p "请选择操作指令: " opt
+    print_rect_title "Sing-box 管理面板  v${SCRIPT_VERSION}"
+    singbox_dashboard_summary
+    ui_hr
+    ui_section "核心功能"
+    echo -e "    ${C}1.${NC} 节点管理       ${D}安装 / 查看 / 删除协议节点${NC}"
+    echo -e "    ${C}2.${NC} 中转管理       ${D}全流量转发 / 按网站分流中转${NC}"
+    echo -e "    ${C}3.${NC} 用户与流量     ${D}多用户管理 / 套餐限额 / 流量统计${NC}"
+    echo -e "    ${C}4.${NC} 导出配置       ${D}Clash / QX / Surge / 通用链接${NC}"
+
+    ui_section "扩展功能（可选）"
+    echo -e "    ${C}5.${NC} WARP 分流      ${D}通过本地 WireProxy 分流指定网站${NC}"
+    echo -e "    ${C}6.${NC} Telegram Bot   ${D}查流量 / 到期提醒 / 远程管理${NC}"
+
+    ui_section "系统维护"
+    echo -e "    ${C}7.${NC} 安装与卸载     ${D}安装内核 / 检查更新 / 一键卸载${NC}"
+    echo -e "    ${C}8.${NC} 系统工具       ${D}重启服务 / 实时日志 / 时间校准${NC}"
+    echo ""
+    echo -e "    ${D}0. 退出${NC}"
+    ui_hr
+    read -r -p "请选择操作: " opt
     case "${opt:-}" in
-      1) install_or_update_singbox ;;
-      2) system_tools_menu || true ;;
-      3) protocol_manager || true ;;
-      4) manage_relay_nodes || true ;;
+      1) protocol_manager || true ;;
+      2) manage_relay_nodes || true ;;
+      3) user_manager_menu || true ;;
+      4) export_configs || true ;;
       5) warp_manager_menu || true ;;
-      6) export_configs || true ;;
-      7) user_manager_menu || true ;;
-      8) uninstall_singbox_keep_config ;;
+      6) telegram_bot_manager_menu || true ;;
+      7) install_and_uninstall_menu || true ;;
+      8) system_tools_menu || true ;;
       0|q|Q) exit 0 ;;
+      "") continue ;;
       *) warn "无效输入：$opt"; sleep 1 ;;
     esac
   done

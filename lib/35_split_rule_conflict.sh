@@ -48,38 +48,72 @@ split_rule_clear_all_meta() {
   meta_save "$meta_json"
 }
 
+SPLIT_RULE_BASE_URL="https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set"
+SPLIT_RULE_LOOKUP_URL="https://github.com/SagerNet/sing-geosite/tree/rule-set"
+
+split_rule_preset_item() {
+  case "${1:-}" in
+    1) echo "AI 服务|geosite-category-ai-!cn.srs" ;;
+    2) echo "Google|geosite-google.srs" ;;
+    3) echo "Netflix|geosite-netflix.srs" ;;
+    4) echo "Disney+|geosite-disney.srs" ;;
+    5) echo "YouTube|geosite-youtube.srs" ;;
+    6) echo "TikTok|geosite-tiktok.srs" ;;
+    *) return 1 ;;
+  esac
+}
+
+split_rule_normalize_file() {
+  local raw="${1:-}" name
+  name="$(printf '%s' "$raw" | tr -d '[:space:]')"
+  [ -n "$name" ] || return 1
+  if [[ "$name" == *"://"* ]]; then
+    err "请输入规则文件名（如 openai 或 geosite-openai.srs），不要输入完整链接。"
+    return 1
+  fi
+  name="${name##*/}"
+  name="${name%.srs}"
+  [[ "$name" == geosite-* ]] || name="geosite-${name}"
+  if [[ ! "$name" =~ ^geosite-[A-Za-z0-9._!@+-]+$ ]]; then
+    err "规则名称格式不对：${raw}"
+    return 1
+  fi
+  echo "${name}.srs"
+}
+
+split_rule_validate_remote_file() {
+  local file="$1" url
+  url="${SPLIT_RULE_BASE_URL}/${file}"
+  run_with_spinner "正在验证规则文件 ${file}..." \
+    curl_maybe_warp -fsIL --connect-timeout 8 --max-time 15 "$url"
+}
+
 split_rule_confirm_relay_to_warp() {
   local files_json="$1" conflicts count
   conflicts="$(split_rule_relay_conflicts_json "$files_json")" || return 1
-  count="$(echo "$conflicts" | jq 'length')" || return 1
+  count="$(printf '%s\n' "$conflicts" | jq 'length')" || return 1
   [ "$count" -gt 0 ] || return 0
 
-  warn "以下规则已在部分流量中转中使用："
-  echo "$conflicts" | jq -r '
+  warn "以下规则当前正在走部分流量中转："
+  printf '%s\n' "$conflicts" | jq -r '
     .[]?
-    | "  - \(.name // .file) -> 落地\(.landing_id // "未设置")：\(.file // "")"
+    | "  - \(.name // .file) -> 落地 \(.landing_id // "未设置")（\(.file // "")）"
   '
-  ask_confirm_yn "是否改为 WARP 分流？(y/N): " || return 1
-}
-
-split_rule_take_over_relay_to_warp() {
-  local files_json="$1"
-  split_rule_confirm_relay_to_warp "$files_json" || return 1
-  relay_rule_remove_meta_by_files_json "$files_json"
+  ask_confirm_yn "是否切换为 WARP 分流？[y/N]: " || return 1
 }
 
 split_rule_confirm_warp_to_relay() {
   local files_json="$1" conflicts count
   conflicts="$(split_rule_warp_conflicts_json "$files_json")" || return 1
-  count="$(echo "$conflicts" | jq 'length')" || return 1
+  count="$(printf '%s\n' "$conflicts" | jq 'length')" || return 1
   [ "$count" -gt 0 ] || return 0
 
-  warn "以下规则已在 WARP 分流中使用："
-  echo "$conflicts" | jq -r '
+  warn "以下规则当前正在走 WARP 分流："
+  printf '%s\n' "$conflicts" | jq -r '
     .[]?
-    | "  - \(.name // .file)：\(.file // "")"
+    | "  - \(.name // .file)（\(.file // "")）"
   '
-  ask_confirm_yn "是否改为部分流量中转？(y/N): " || return 1
+  ask_confirm_yn "是否切换为部分流量中转？[y/N]: " || return 1
 }
 
 split_rule_take_over_warp_to_relay() {

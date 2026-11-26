@@ -12,7 +12,7 @@ WARP_SCRIPT_DOC_URL="https://gitlab.com/fscarmen/warp"
 WARP_SCRIPT_RAW_URL="https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
 
 warp_hr() {
-  echo -e "${B}--------------------------------------------------------${NC}"
+  ui_hr
 }
 
 warp_meta_json() {
@@ -105,26 +105,11 @@ warp_rule_remove_meta_by_files_json_from() {
 }
 
 warp_normalize_rule_file() {
-  local raw="${1:-}" value
-  value="$(printf '%s' "$raw" | tr -d '[:space:]')"
-  [ -n "$value" ] || return 1
-  if [[ "$value" == *"://"* ]]; then
-    err "请输入 rule-set 文件名，不要输入完整 URL。"
-    return 1
-  fi
-  [[ "$value" == geosite-* ]] || value="geosite-${value}"
-  [[ "$value" == *.srs ]] || value="${value}.srs"
-  [[ "$value" =~ ^geosite-[A-Za-z0-9._@!+-]+\.srs$ ]] || {
-    err "规则名格式无效：$value"
-    return 1
-  }
-  echo "$value"
+  split_rule_normalize_file "$@"
 }
 
 warp_validate_rule_file() {
-  local file="$1" url
-  url="$(warp_rule_url_for_file "$file")"
-  curl_maybe_warp -fsIL --connect-timeout 10 --max-time 20 "$url" >/dev/null 2>&1
+  split_rule_validate_remote_file "$@"
 }
 
 warp_rule_add_meta() {
@@ -162,8 +147,8 @@ warp_init_env() {
 
 warp_require_singbox() {
   has_cmd sing-box || {
-    err "未找到 sing-box，无法写入 WARP 分流策略。"
-    warn "请先在主菜单执行 1. 安装/更新 sing-box。"
+    err "尚未安装 sing-box，无法写入 WARP 分流规则。"
+    warn "请先在主菜单进入「7. 安装与卸载」安装 sing-box。"
     pause
     return 1
   }
@@ -331,8 +316,8 @@ warp_require_wireproxy_ready() {
   if warp_wireproxy_ready; then
     return 0
   fi
-  err "WireProxy SOCKS 未就绪，无法添加 WARP 分流。"
-  warn "请先按页面提示安装 fscarmen WARP 脚本的 WireProxy 方案。"
+  err "还没检测到本地 WARP 代理（WireProxy），暂时无法开启分流。"
+  warn "请先按页面提示安装 WireProxy 后再试。"
   pause
   return 1
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# build.sh — 将 lib/*.sh 模块合并为单体 sb.sh 用于分发
+# build.sh — 将 lib/*.sh 与 py/*.py 合并为单体 sb.sh 用于分发
 # 用法: bash build.sh
 # ============================================================
 set -euo pipefail
@@ -14,13 +14,31 @@ if [ ! -d "$LIB_DIR" ]; then
   exit 1
 fi
 
+emit_module_with_embeds() {
+  local file="$1" line rel_path target
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    if [[ "$line" =~ ^#\ __EMBED_PY__:(.+)$ ]]; then
+      rel_path="${BASH_REMATCH[1]}"
+      target="${SCRIPT_DIR}/${rel_path}"
+      if [ ! -f "$target" ]; then
+        echo "[ERR] 未找到待内嵌文件: $target" >&2
+        return 1
+      fi
+      sed 's/\r$//' "$target"
+    else
+      printf '%s\n' "$line"
+    fi
+  done < <(tail -n +2 "$file")
+}
+
 {
   echo '#!/usr/bin/env bash'
   echo ''
   echo '# ============================================================'
-  echo '# Sing-box Elite Management System'
+  echo '# Sing-box Management System'
   echo '# 由 build.sh 自动合并生成，请勿直接编辑此文件'
-  echo '# 源码位于 lib/ 目录下的各模块文件'
+  echo '# 源码位于 lib/ 与 py/ 目录'
   echo '# ============================================================'
   echo ''
 
@@ -29,8 +47,7 @@ fi
     fname="$(basename "$f")"
     echo ""
     echo "# >>>>>>>>> BEGIN MODULE: $fname <<<<<<<<<<<"
-    # 跳过 shebang 行，保留其余全部内容
-    tail -n +2 "$f" | sed 's/\r$//'
+    emit_module_with_embeds "$f"
     echo ""
     echo "# >>>>>>>>> END MODULE: $fname <<<<<<<<<<<"
   done

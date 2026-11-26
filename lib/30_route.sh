@@ -265,10 +265,35 @@ hy2_hop_remove() {
     ip6tables -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-port "$port" 2>/dev/null || true
   fi
   if ! has_cmd iptables && ! has_cmd ip6tables && has_cmd nft; then
-    warn "本机只有 nft 可用，跳跃规则需手动删除：nft delete rule ip nat prerouting udp dport ${start}-${end} redirect to :${port}（按 handle 删除更稳妥）。"
+    local fam handle
+    for fam in ip ip6; do
+      while IFS= read -r handle; do
+        [ -n "$handle" ] && nft delete rule "$fam" nat prerouting handle "$handle" 2>/dev/null || true
+      done < <(nft -a list chain "$fam" nat prerouting 2>/dev/null \
+        | awk -v pat="udp dport ${start}-${end} redirect to :${port}" 'index($0, pat) && /# handle [0-9]+/ { print $NF }')
+    done
   fi
-  hy2_hop_persist || warn "端口跳跃规则已删除，但持久化更新失败（${_HY2_PERSIST_FAIL}），重启后旧规则可能恢复，请手动保存。"
+  hy2_hop_persist >/dev/null 2>&1 || true
   return 0
+}
+
+# 彻底卸载时调用：按 meta 清理全部端口跳跃防火墙规则与开机自恢复服务。
+hy2_hop_remove_all_from_meta() {
+  local meta_json _tag _start _end _port
+  meta_json="$(meta_load 2>/dev/null)" || meta_json='{}'
+  [ -n "$meta_json" ] || meta_json='{}'
+  while IFS=' ' read -r _tag _start _end; do
+    [ -n "$_tag" ] || continue
+    _port="$(entry_key_to_port "$_tag")"
+    [ -n "$_port" ] || continue
+    hy2_hop_remove "$_start" "$_end" "$_port" 2>/dev/null || true
+  done < <(printf '%s\n' "$meta_json" | jq -r '
+    to_entries[]
+    | select(.key | startswith("hy2-"))
+    | select(.value.hop_start != null and .value.hop_end != null)
+    | "\(.key) \(.value.hop_start) \(.value.hop_end)"
+  ' 2>/dev/null)
+  hy2_hop_restore_remove >/dev/null 2>&1 || true
 }
 
 # ====================================================

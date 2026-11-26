@@ -6,16 +6,23 @@ bash tests/reliability.sh
 bash tests/migration.sh
 bash tests/export.sh
 bash tests/telegram-tasks.sh
+if [ -f tests/tg-center-unit.py ]; then
+  python3 tests/tg-center-unit.py
+fi
 check_tmp="$(mktemp -d)"
 trap 'rm -rf "$check_tmp"' EXIT
-cp -R lib build.sh "$check_tmp/"
+cp -R lib py build.sh "$check_tmp/"
 bash "$check_tmp/build.sh"
 cmp sb.sh "$check_tmp/sb.sh"
 python3 - <<'PY'
 import ast
 from pathlib import Path
-source = Path('lib/63_telegram_bot.sh').read_text()
-embedded = source.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+src = Path('py/tg_center_bot.py').read_text(encoding='utf-8')
+ast.parse(src)
+built = Path('sb.sh').read_text(encoding='utf-8')
+assert '# __EMBED_PY__:' not in built, 'Unresolved embed placeholder in sb.sh'
+marker = 'cat > "$TG_CENTER_APP" <<\'PY\'\n'
+embedded = built.split(marker, 1)[1].split('\nPY\n', 1)[0]
 ast.parse(embedded)
-print('PASS embedded Telegram Python syntax')
+print('PASS standalone & embedded Telegram Python syntax')
 PY
