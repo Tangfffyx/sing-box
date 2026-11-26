@@ -16,7 +16,7 @@
 set -Eeuo pipefail
 
 # -------------------- 版本 --------------------
-SCRIPT_VERSION="6.2.0"
+SCRIPT_VERSION="7.0.0"
 
 # -------------------- 路径常量 --------------------
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -61,15 +61,97 @@ BUSINESS_TZ="Asia/Shanghai"
 
 # -------------------- 颜色 --------------------
 B='\033[1;34m'; G='\033[1;32m'; R='\033[1;31m'; Y='\033[1;33m'
-C='\033[1;36m'; NC='\033[0m'; W='\033[1;37m'
+C='\033[1;36m'; NC='\033[0m'; W='\033[1;37m'; D='\033[2m'
 
 # -------------------- 日志/UI 函数 --------------------
-say()  { echo -e "${C}[INFO]${NC} $*"; }
-ok()   { echo -e "${G}[ OK ]${NC} $*"; }
-warn() { echo -e "${Y}[WARN]${NC} $*" >&2; }
-err()  { echo -e "${R}[ERR ]${NC} $*" >&2; }
+say()  { echo -e "${C}•${NC} $*"; }
+ok()   { echo -e "${G}✓${NC} $*"; }
+warn() { echo -e "${Y}!${NC} $*" >&2; }
+err()  { echo -e "${R}✗${NC} $*" >&2; }
 pause(){ read -r -n 1 -p "按任意键继续..." || true; echo ""; }
 ui_echo(){ printf '%b\n' "$*" >&2; }
+
+ui_hr() {
+  printf '%b%s%b\n' "$D" "──────────────────────────────────────────────────────" "$NC"
+}
+
+ui_section() {
+  printf '\n  %b%s%b\n' "$W" "$1" "$NC"
+}
+
+# 生成轻量可视化进度条（默认 10 格，如 ████░░░░░░）
+ui_mini_bar() {
+  local percent="${1:-0}" width="${2:-10}" filled empty
+  [[ "$percent" =~ ^[0-9]+$ ]] || percent=0
+  (( percent < 0 )) && percent=0
+  (( percent > 100 )) && percent=100
+  filled=$(( (percent * width + 50) / 100 ))
+  (( filled > width )) && filled=$width
+  empty=$(( width - filled ))
+  local bar_f="" bar_e="" i
+  for ((i=0; i<filled; i++)); do bar_f+="█"; done
+  for ((i=0; i<empty; i++)); do bar_e+="░"; done
+  printf '%s%s' "$bar_f" "$bar_e"
+}
+
+ui_step() {
+  local cur="$1" total="$2" msg="$3"
+  printf '%b[%s/%s]%b %s\n' "$C" "$cur" "$total" "$NC" "$msg"
+}
+
+# 为耗时命令提供旋转进度提示 + 已用秒数，避免假死感。
+# 非交互终端（如 cron/管道/测试）自动降级为直接执行，不输出控制字符。
+run_with_spinner() {
+  local label="$1"
+  shift
+  if [ ! -t 1 ] || [ ! -t 2 ]; then
+    "$@"
+    return $?
+  fi
+
+  local tmp_out pid rc start_ts now_ts elapsed tick=0
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  tmp_out="$(mktemp /tmp/sb-spin.XXXXXX)" || { "$@"; return $?; }
+  start_ts="$(date +%s)"
+
+  "$@" >"$tmp_out" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    now_ts="$(date +%s)"
+    elapsed=$((now_ts - start_ts))
+    if [ "$elapsed" -gt 0 ]; then
+      printf '\r%b%s%b %s %b(%ds)%b\033[K' "$C" "${frames[$((tick % 10))]}" "$NC" "$label" "$D" "$elapsed" "$NC" >&2
+    else
+      printf '\r%b%s%b %s\033[K' "$C" "${frames[$((tick % 10))]}" "$NC" "$label" >&2
+    fi
+    tick=$((tick + 1))
+    sleep 0.12 2>/dev/null || sleep 1
+  done
+
+  if wait "$pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  now_ts="$(date +%s)"
+  elapsed=$((now_ts - start_ts))
+  printf '\r\033[K' >&2
+
+  if [ "$rc" -eq 0 ]; then
+    if [ "$elapsed" -ge 1 ]; then
+      printf '%b✓%b %s %b(%ds)%b\n' "$G" "$NC" "$label" "$D" "$elapsed" "$NC" >&2
+    else
+      printf '%b✓%b %s\n' "$G" "$NC" "$label" >&2
+    fi
+  else
+    printf '%b✗%b %s\n' "$R" "$NC" "$label" >&2
+    if [ -s "$tmp_out" ]; then
+      tail -n 20 "$tmp_out" | sed 's/^/  /' >&2
+    fi
+  fi
+  rm -f "$tmp_out" >/dev/null 2>&1 || true
+  return "$rc"
+}
 
 param_echo() {
   local label="$1" value="$2"
@@ -109,7 +191,7 @@ pad_display_text() {
 
 print_rect_title() {
   local title="$1"
-  local inner_width=46
+  local inner_width=52
   local title_width pad left right line
 
   title_width=$(text_display_width "$title")
@@ -119,11 +201,13 @@ print_rect_title() {
   left=$(( pad / 2 ))
   right=$(( pad - left ))
 
-  line=$(printf '%*s' "$inner_width" '' | tr ' ' '-')
+  line=""
+  local i
+  for ((i=0; i<inner_width; i++)); do line+="─"; done
 
-  printf "%b+%s+%b\n" "$B" "$line" "$NC"
-  printf "%b|%*s%s%*s|%b\n" "$B" "$left" "" "$title" "$right" "" "$NC"
-  printf "%b+%s+%b\n" "$B" "$line" "$NC"
+  printf "%b╭%s╮%b\n" "$C" "$line" "$NC"
+  printf "%b│%b%*s%b%s%b%*s%b│%b\n" "$C" "$NC" "$left" "" "$W" "$title" "$NC" "$right" "" "$C" "$NC"
+  printf "%b╰%s╯%b\n" "$C" "$line" "$NC"
 }
 
 table_compute_widths() {
@@ -178,6 +262,18 @@ declare -A PROTO_PREFIX=(
   [vless-ws]=vless-ws
   [tuic]=tuic
   [socks]=socks
+)
+
+declare -A PROTO_DESC=(
+  [vless-reality]="推荐，免域名抗封锁"
+  [anytls]="轻量抗特征，适合新客户端"
+  [hysteria2]="UDP 加速，适合高丢包线路"
+  [shadowsocks]="SS2022，简单高速"
+  [socks]="SOCKS5 代理，常用于中转落地"
+  [trojan]="经典伪装，兼容性好"
+  [vmess-ws]="配合 CDN / 反代域名使用"
+  [vless-ws]="配合 CDN / 反代域名使用"
+  [tuic]="QUIC 低延迟 UDP 协议"
 )
 
 declare -A PREFIX_TO_PROTO=()
@@ -375,13 +471,14 @@ run_with_timeout() {
 }
 
 download_file() {
-  local url="$1" output="$2" connect_timeout="${3:-20}" retry_count="${4:-3}"
+  local url="$1" output="$2" connect_timeout="${3:-20}" retry_count="${4:-3}" label="${5:-正在下载}"
   if [ ! -t 1 ] || [ ! -t 2 ]; then
     curl -fsSL --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output" >/dev/null 2>&1
     return $?
   fi
 
-  local total tmp_err curl_pid rc size tick=0
+  local total tmp_err curl_pid rc size prev_size=0 speed=0 tick=0
+  printf '\r%b⠋%b %s（连接中...）\033[K' "$C" "$NC" "$label" >&2
   total="$(download_file_total_bytes "$url" "$connect_timeout")"
   tmp_err="$(mktemp /tmp/sb-download-err.XXXXXX)" || return 1
   rm -f "$output" >/dev/null 2>&1 || true
@@ -390,7 +487,13 @@ download_file() {
   curl_pid=$!
   while kill -0 "$curl_pid" 2>/dev/null; do
     size="$(file_size_bytes "$output")"
-    print_download_progress "$size" "$total" "$tick"
+    if [ "$size" -ge "$prev_size" ]; then
+      speed=$((size - prev_size))
+    else
+      speed=0
+    fi
+    prev_size="$size"
+    print_download_progress "$size" "$total" "$tick" "$speed" "$label"
     tick=$((tick + 1))
     sleep 1
   done
@@ -402,8 +505,14 @@ download_file() {
   fi
 
   clear_download_progress
-  if [ "$rc" -ne 0 ] && [ -s "$tmp_err" ]; then
-    sed 's/^/  /' "$tmp_err" >&2
+  if [ "$rc" -eq 0 ]; then
+    size="$(file_size_bytes "$output")"
+    printf '%b✓%b %s完成 %b(%s)%b\n' "$G" "$NC" "$label" "$D" "$(format_download_bytes "$size")" "$NC" >&2
+  else
+    printf '%b✗%b %s失败\n' "$R" "$NC" "$label" >&2
+    if [ -s "$tmp_err" ]; then
+      sed 's/^/  /' "$tmp_err" >&2
+    fi
   fi
   rm -f "$tmp_err" >/dev/null 2>&1 || true
   return "$rc"
@@ -412,7 +521,7 @@ download_file() {
 download_file_total_bytes() {
   local url="$1" connect_timeout="${2:-20}" total
   [ "$connect_timeout" -gt 5 ] && connect_timeout=5
-  total="$(curl -fsSIL --connect-timeout "$connect_timeout" --max-time 10 "$url" 2>/dev/null \
+  total="$(curl -fsSIL --connect-timeout "$connect_timeout" --max-time 8 "$url" 2>/dev/null \
     | awk 'tolower($1) == "content-length:" {gsub(/\r/,"",$2); n=$2} END {if (n ~ /^[0-9]+$/) print n}')" || true
   echo "${total:-0}"
 }
@@ -429,40 +538,38 @@ file_size_bytes() {
 format_download_bytes() {
   local bytes="${1:-0}"
   awk -v b="$bytes" 'BEGIN {
-    if (b >= 1073741824) printf "%.1fG", b / 1073741824;
-    else if (b >= 1048576) printf "%.1fM", b / 1048576;
-    else if (b >= 1024) printf "%.1fK", b / 1024;
-    else printf "%dB", b;
+    if (b >= 1073741824) printf "%.1f GB", b / 1073741824;
+    else if (b >= 1048576) printf "%.1f MB", b / 1048576;
+    else if (b >= 1024) printf "%.1f KB", b / 1024;
+    else printf "%d B", b;
   }'
 }
 
 print_download_progress() {
-  local size="${1:-0}" total="${2:-0}" tick="${3:-0}" width=24
-  local percent filled bar spin
+  local size="${1:-0}" total="${2:-0}" tick="${3:-0}" speed="${4:-0}" label="${5:-正在下载}" width=22
+  local percent filled empty bar="" i speed_txt=""
+  if [[ "$speed" =~ ^[0-9]+$ ]] && [ "$speed" -gt 0 ]; then
+    speed_txt="  $(format_download_bytes "$speed")/s"
+  fi
   if [[ "$total" =~ ^[0-9]+$ ]] && [ "$total" -gt 0 ]; then
     percent=$((size * 100 / total))
     [ "$percent" -gt 100 ] && percent=100
     filled=$((percent * width / 100))
-    bar="$(printf '%*s' "$filled" '' | tr ' ' '=')"
-    if [ "$filled" -lt "$width" ]; then
-      bar="${bar}>$(printf '%*s' $((width - filled - 1)) '')"
-    fi
-    printf '\r下载中 [%-*s] %3d%% %s/%s' "$width" "$bar" "$percent" "$(format_download_bytes "$size")" "$(format_download_bytes "$total")"
+    empty=$((width - filled))
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    printf '\r%b%s%b [%b%s%b] %3d%%  %s / %s%s\033[K' \
+      "$C" "$label" "$NC" "$G" "$bar" "$NC" "$percent" \
+      "$(format_download_bytes "$size")" "$(format_download_bytes "$total")" "$speed_txt" >&2
   else
-    case $((tick % 4)) in
-      0) spin="|" ;;
-      1) spin="/" ;;
-      2) spin="-" ;;
-      *) spin="\\" ;;
-    esac
-    printf '\r下载中 [%s] %s' "$spin" "$(format_download_bytes "$size")"
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    printf '\r%b%s%b %s  %s%s\033[K' \
+      "$C" "${frames[$((tick % 10))]}" "$NC" "$label" "$(format_download_bytes "$size")" "$speed_txt" >&2
   fi
 }
 
 clear_download_progress() {
-  local cols="${COLUMNS:-80}"
-  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
-  printf '\r%*s\r' "$cols" ''
+  printf '\r\033[K' >&2
 }
 
 now_ms() {
@@ -650,18 +757,27 @@ parse_plus_selections() {
 }
 
 ask_confirm_yes() {
-  local prompt="${1:-输入 YES 确认继续，其它任意输入取消: }"
+  local prompt="${1:-输入 yes 确认继续（直接回车取消）: }"
   local ans
-  read -r -p "$prompt" ans
-  [ "$ans" = "YES" ]
+  printf '%s' "$prompt" >&2
+  read -r ans || ans=""
+  [[ "${ans,,}" == "yes" ]]
 }
 
 ask_confirm_yn() {
-  local prompt="${1:-确认继续吗？(y/N): }"
+  local prompt="${1:-确认继续吗？[y/N]: }"
   local ans
   printf '%s' "$prompt" >&2
   read -r ans || ans=""
   [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+ask_confirm_default_yes() {
+  local prompt="${1:-是否继续？[Y/n]: }"
+  local ans
+  printf '%s' "$prompt" >&2
+  read -r ans || ans=""
+  [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]
 }
 
 is_valid_ymd_date() {
@@ -690,9 +806,12 @@ is_valid_port() {
 
 ask_port_or_return() {
   local prompt="$1" default="$2" outvar="$3"
-  local val __retry
+  local val
   while true; do
-    read -r -p "$prompt" val
+    read -r -p "$prompt" val || return 1
+    if [ "$val" = "0" ] || [ "${val,,}" = "q" ]; then
+      return 1
+    fi
     if [ -z "$val" ]; then
       val="$default"
     fi
@@ -700,9 +819,7 @@ ask_port_or_return() {
       printf -v "$outvar" '%s' "$val"
       return 0
     fi
-    warn "端口输入无效：${val}。请输入 1-65535 的数字，回车使用默认值 ${default}。"
-    read -r -p "输入 1 重新填写，其它任意键返回上一级: " __retry
-    [ "${__retry:-}" = "1" ] || return 1
+    warn "端口无效（请输入 1-65535，回车默认 ${default}，输入 0 返回）"
   done
 }
 
@@ -1227,7 +1344,7 @@ _config_apply_body() {
   fi
 
   if ! sing-box check -c "$tmp_file" >/dev/null 2>&1; then
-    err "sing-box check 校验未通过，未写入配置。"
+    err "新配置检查未通过，已保留原配置（原因如下）："
     sing-box check -c "$tmp_file" 2>&1 | sed 's/^/  /'
     rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
@@ -1264,7 +1381,18 @@ _config_apply_body() {
   }
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
-  if _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe; then
+  if [ -t 1 ] && [ -t 2 ] && [ "${_RESTART_SINGBOX_QUIET_OK:-0}" != "1" ]; then
+    if run_with_spinner "正在重启 sing-box 服务并等待就绪..." reload_or_restart_singbox_safe; then
+      case "$INIT_SYSTEM" in
+        systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
+        openrc)  openrc_enable_service sing-box default >/dev/null 2>&1 || true ;;
+      esac
+      rm -f "$prev_tmp" >/dev/null 2>&1 || true
+      ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
+      [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已生效。"
+      return 0
+    fi
+  elif _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe; then
     case "$INIT_SYSTEM" in
       systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
       openrc)  openrc_enable_service sing-box default >/dev/null 2>&1 || true ;;
@@ -1272,11 +1400,11 @@ _config_apply_body() {
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
     # 自动清理旧备份，保留最近 1 个
     ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
-    [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已应用。"
+    [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已生效。"
     return 0
   fi
 
-  err "热载/重启失败：正在回滚。"
+  err "新配置启动失败，正在自动恢复原配置..."
   if [ -f "$prev_tmp" ] && [ -s "$prev_tmp" ]; then
     cp -a "$prev_tmp" "$backup" || warn "失败现场备份未能保存到 $backup"
     if ! cp -a "$prev_tmp" "$CONFIG_FILE"; then
@@ -2574,38 +2702,72 @@ split_rule_clear_all_meta() {
   meta_save "$meta_json"
 }
 
+SPLIT_RULE_BASE_URL="https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set"
+SPLIT_RULE_LOOKUP_URL="https://github.com/SagerNet/sing-geosite/tree/rule-set"
+
+split_rule_preset_item() {
+  case "${1:-}" in
+    1) echo "AI 服务|geosite-category-ai-!cn.srs" ;;
+    2) echo "Google|geosite-google.srs" ;;
+    3) echo "Netflix|geosite-netflix.srs" ;;
+    4) echo "Disney+|geosite-disney.srs" ;;
+    5) echo "YouTube|geosite-youtube.srs" ;;
+    6) echo "TikTok|geosite-tiktok.srs" ;;
+    *) return 1 ;;
+  esac
+}
+
+split_rule_normalize_file() {
+  local raw="${1:-}" name
+  name="$(printf '%s' "$raw" | tr -d '[:space:]')"
+  [ -n "$name" ] || return 1
+  if [[ "$name" == *"://"* ]]; then
+    err "请输入规则文件名（如 openai 或 geosite-openai.srs），不要输入完整链接。"
+    return 1
+  fi
+  name="${name##*/}"
+  name="${name%.srs}"
+  [[ "$name" == geosite-* ]] || name="geosite-${name}"
+  if [[ ! "$name" =~ ^geosite-[A-Za-z0-9._!@+-]+$ ]]; then
+    err "规则名称格式不对：${raw}"
+    return 1
+  fi
+  echo "${name}.srs"
+}
+
+split_rule_validate_remote_file() {
+  local file="$1" url
+  url="${SPLIT_RULE_BASE_URL}/${file}"
+  run_with_spinner "正在验证规则文件 ${file}..." \
+    curl_maybe_warp -fsIL --connect-timeout 8 --max-time 15 "$url"
+}
+
 split_rule_confirm_relay_to_warp() {
   local files_json="$1" conflicts count
   conflicts="$(split_rule_relay_conflicts_json "$files_json")" || return 1
-  count="$(echo "$conflicts" | jq 'length')" || return 1
+  count="$(printf '%s\n' "$conflicts" | jq 'length')" || return 1
   [ "$count" -gt 0 ] || return 0
 
-  warn "以下规则已在部分流量中转中使用："
-  echo "$conflicts" | jq -r '
+  warn "以下规则当前正在走部分流量中转："
+  printf '%s\n' "$conflicts" | jq -r '
     .[]?
-    | "  - \(.name // .file) -> 落地\(.landing_id // "未设置")：\(.file // "")"
+    | "  - \(.name // .file) -> 落地 \(.landing_id // "未设置")（\(.file // "")）"
   '
-  ask_confirm_yn "是否改为 WARP 分流？(y/N): " || return 1
-}
-
-split_rule_take_over_relay_to_warp() {
-  local files_json="$1"
-  split_rule_confirm_relay_to_warp "$files_json" || return 1
-  relay_rule_remove_meta_by_files_json "$files_json"
+  ask_confirm_yn "是否切换为 WARP 分流？[y/N]: " || return 1
 }
 
 split_rule_confirm_warp_to_relay() {
   local files_json="$1" conflicts count
   conflicts="$(split_rule_warp_conflicts_json "$files_json")" || return 1
-  count="$(echo "$conflicts" | jq 'length')" || return 1
+  count="$(printf '%s\n' "$conflicts" | jq 'length')" || return 1
   [ "$count" -gt 0 ] || return 0
 
-  warn "以下规则已在 WARP 分流中使用："
-  echo "$conflicts" | jq -r '
+  warn "以下规则当前正在走 WARP 分流："
+  printf '%s\n' "$conflicts" | jq -r '
     .[]?
-    | "  - \(.name // .file)：\(.file // "")"
+    | "  - \(.name // .file)（\(.file // "")）"
   '
-  ask_confirm_yn "是否改为部分流量中转？(y/N): " || return 1
+  ask_confirm_yn "是否切换为部分流量中转？[y/N]: " || return 1
 }
 
 split_rule_take_over_warp_to_relay() {
@@ -2689,7 +2851,7 @@ RELAY_RULE_BASE_URL="https://raw.githubusercontent.com/SagerNet/sing-geosite/rul
 RELAY_RULE_LOOKUP_URL="https://github.com/SagerNet/sing-geosite/tree/rule-set"
 
 relay_hr() {
-  echo -e "${B}--------------------------------------------------------${NC}"
+  ui_hr
 }
 
 relay_partial_outbound_tag() {
@@ -3172,38 +3334,15 @@ relay_rule_remove_meta_by_files_json_from() {
 }
 
 relay_normalize_rule_file() {
-  local raw="${1:-}" value
-  value="$(printf '%s' "$raw" | tr -d '[:space:]')"
-  [ -n "$value" ] || return 1
-  if [[ "$value" == *"://"* ]]; then
-    err "请输入 rule-set 文件名，不要输入完整 URL。"
-    return 1
-  fi
-  [[ "$value" == geosite-* ]] || value="geosite-${value}"
-  [[ "$value" == *.srs ]] || value="${value}.srs"
-  [[ "$value" =~ ^geosite-[A-Za-z0-9._@!+-]+\.srs$ ]] || {
-    err "规则名格式无效：$value"
-    return 1
-  }
-  echo "$value"
+  split_rule_normalize_file "$@"
 }
 
 relay_validate_rule_file() {
-  local file="$1" url
-  url="$(relay_rule_url_for_file "$file")"
-  curl -fsIL --connect-timeout 10 --max-time 20 "$url" >/dev/null 2>&1
+  split_rule_validate_remote_file "$@"
 }
 
 relay_preset_rule() {
-  case "$1" in
-    1) echo "AI 服务|geosite-category-ai-!cn.srs" ;;
-    2) echo "Google|geosite-google.srs" ;;
-    3) echo "Netflix|geosite-netflix.srs" ;;
-    4) echo "Disney+|geosite-disney.srs" ;;
-    5) echo "YouTube|geosite-youtube.srs" ;;
-    6) echo "TikTok|geosite-tiktok.srs" ;;
-    *) return 1 ;;
-  esac
+  split_rule_preset_item "$@"
 }
 
 relay_rule_add_meta() {
@@ -3704,10 +3843,9 @@ ensure_grpcurl() {
   download_url="$(echo "$api_json" | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' 2>/dev/null | head -n1)" || true
   [ -n "$download_url" ] || { warn "未找到 grpcurl 适配当前架构的安装包。"; return 1; }
   tmp_dir="$(make_disk_tmp_dir sb-install)" || { warn "创建临时目录失败。"; return 1; }
-  say "下载流量统计组件..."
-  if ! download_file "$download_url" "$tmp_dir/grpcurl.tar.gz" 20 3; then
+  if ! download_file "$download_url" "$tmp_dir/grpcurl.tar.gz" 20 3 "下载流量统计组件"; then
     rm -rf "$tmp_dir"
-    warn "下载 grpcurl 失败。"
+    warn "下载流量统计组件失败。"
     return 1
   fi
   tar -xzf "$tmp_dir/grpcurl.tar.gz" -C "$tmp_dir" || { rm -rf "$tmp_dir"; warn "解压 grpcurl 失败。"; return 1; }
@@ -4417,38 +4555,50 @@ show_user_status_table() {
   local -a rows=()
   local -a cols=()
 
-  header="用户名${sep}状态${sep}上传流量${sep}下载流量${sep}补正流量${sep}已用总量${sep}套餐${sep}重置日${sep}到期时间"
+  header="用户名${sep}状态${sep}已用 / 套餐${sep}进度${sep}重置日${sep}到期"
   rows+=("$header")
 
   while IFS= read -r row_line; do
     [ -n "$row_line" ] && rows+=("$row_line")
   done < <(
-    echo "$db_json" | jq -r '
+    printf '%s\n' "$db_json" | jq -r '
       .users
       | to_entries
       | .[]
+      | (.value.enabled == true) as $en
+      | (.value.disabled_reason // "") as $reason
+      | (if $en then "正常"
+         elif $reason == "quota" then "超流量"
+         elif $reason == "expired" then "已过期"
+         else "已停用" end) as $st
+      | ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $used
+      | (.value.quota_gb // 0) as $qgb
       | [
           .key,
-          (if (.value.enabled == true) then "开启" else "关闭" end),
-          ((.value.used_up_bytes // 0) | tostring),
-          ((.value.used_down_bytes // 0) | tostring),
-          ((.value.manual_added_bytes // 0) | tostring),
-          (((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) | tostring),
-          ((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end)),
+          $st,
+          ($used | tostring),
+          ($qgb | tostring),
           (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 32 then "月底" else ((.value.reset_day|tostring) + "号") end),
           (if (.value.expire_at // "0") == "0" then "永久" else (.value.expire_at // "0") end)
         ] | join("\u0001")
-    ' | while IFS=$'\x01' read -r c1 c2 c3 c4 c5 c6 c7 c8 c9; do
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$c1" \
-            "$c2" \
-            "$(format_bytes_human "$c3")" \
-            "$(format_bytes_human "$c4")" \
-            "$(format_bytes_human "$c5")" \
-            "$(format_bytes_human "$c6")" \
-            "$c7" \
-            "$c8" \
-            "$c9"
+    ' | while IFS=$'\x01' read -r c_name c_status c_used c_qgb c_reset c_expire; do
+          local used_txt usage_col bar_col pct
+          used_txt="$(format_bytes_human "$c_used")"
+          if [ "${c_qgb:-0}" -gt 0 ] 2>/dev/null; then
+            usage_col="${used_txt} / ${c_qgb}GB"
+            pct="$(awk -v u="$c_used" -v q="$c_qgb" 'BEGIN {
+              p = (u * 100.0) / (q * 1073741824.0);
+              if (p < 0) p = 0;
+              if (p > 100) p = 100;
+              printf "%d", p + 0.5;
+            }')"
+            bar_col="$(ui_mini_bar "$pct" 8) ${pct}%"
+          else
+            usage_col="${used_txt} / 不限"
+            bar_col="—"
+          fi
+          printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$c_name" "$c_status" "$usage_col" "$bar_col" "$c_reset" "$c_expire"
       done
   )
 
@@ -4458,17 +4608,40 @@ show_user_status_table() {
   local header_line divider_line divider_width
   header_line="$(table_print_row "$widths_line" "${cols[@]}")"
   divider_width="$(text_display_width "$header_line")"
-  divider_line="$(printf '%*s' "$divider_width" '' | tr ' ' '-')"
+  divider_line=""
+  local i
+  for ((i=0; i<divider_width; i++)); do divider_line+="─"; done
 
-  ui_echo "\033[1m${header_line}${NC}"
-  ui_echo "${B}${divider_line}${NC}"
+  ui_echo "${W}${header_line}${NC}"
+  ui_echo "${D}${divider_line}${NC}"
 
   for row_line in "${rows[@]:1}"; do
     IFS="$sep" read -r -a cols <<< "$row_line"
     table_print_row "$widths_line" "${cols[@]}"
   done
 
-  ui_echo "${B}${divider_line}${NC}"
+  ui_echo "${D}${divider_line}${NC}"
+}
+
+show_user_detail_card() {
+  local db_json="$1" username="$2"
+  local up down manual total
+  IFS=$'\x01' read -r up down manual total < <(
+    printf '%s\n' "$db_json" | jq -r --arg u "$username" '
+      .users[$u] as $v
+      | [
+          (($v.used_up_bytes // 0) | tostring),
+          (($v.used_down_bytes // 0) | tostring),
+          (($v.manual_added_bytes // 0) | tostring),
+          ((($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) | tostring)
+        ] | join("\u0001")
+    '
+  )
+  printf '  %b流量明细：%b上传 %b%s%b · 下载 %b%s%b · 补正 %b%s%b · 合计 %b%s%b\n' \
+    "$D" "$NC" "$C" "$(format_bytes_human "$up")" "$NC" \
+    "$C" "$(format_bytes_human "$down")" "$NC" \
+    "$C" "$(format_bytes_human "$manual")" "$NC" \
+    "$W" "$(format_bytes_human "$total")" "$NC"
 }
 
 prompt_reset_day() {
@@ -4619,7 +4792,10 @@ user_add_menu() {
     }
   ')"
   user_manager_commit_edit "$before_db" "$db_json" || { pause; return 1; }
-  pause
+  echo ""
+  if ask_confirm_default_yes "是否立即导出用户 ${username} 的节点配置？[Y/n]: "; then
+    export_configs "$username" || true
+  fi
 }
 
 user_manage_permission_menu() {
@@ -4788,10 +4964,7 @@ user_reset_usage_menu() {
   ui_echo "将清零该用户的上传流量、下载流量和手动补正流量。"
   ui_echo "此操作不会修改用户的启用状态、套餐设置、到期时间或重置日。"
   local ans
-  read -r -p "输入 YES 确认重置该用户流量，其它任意输入取消: " ans
-  if [ "$ans" != "YES" ]; then
-    return 1
-  fi
+  ask_confirm_yes "输入 yes 确认清零该用户流量（回车取消）: " || return 1
   echo "$db_json" | jq --arg u "$username" '
     .users[$u].used_up_bytes = 0
     | .users[$u].used_down_bytes = 0
@@ -4917,25 +5090,34 @@ user_manage_single() {
     db_json="$(user_db_load)"
     json="$(config_load)"
     clear
-    print_rect_title "管理用户"
+    print_rect_title "管理用户 · ${username}"
     show_user_status_table "$db_json"
-    echo "当前用户：$username"
-    [ $is_admin -eq 1 ] && echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
+    show_user_detail_card "$db_json" "$username"
+    [ $is_admin -eq 1 ] && echo -e "  ${D}admin 为系统默认管理员，不可删除，拥有全部节点权限。${NC}"
     show_user_allowed_nodes "$db_json" "$username"
-    echo "  1. 启用/停用"
-    [ $is_admin -eq 0 ] && echo "  2. 节点权限"
-    echo "  3. 套餐设置"
-    echo "  4. 手动重置流量"
-    echo "  5. 手动添加流量（对齐总量）"
-    echo "  6. 一键续期"
-    echo "  0. 返回上一级"
-    read -r -p "请选择操作: " act
+    ui_hr
+    local toggle_txt
+    if user_db_user_is_enabled "$db_json" "$username"; then
+      toggle_txt="停用该用户"
+    else
+      toggle_txt="启用该用户"
+    fi
+    echo -e "  ${C}1.${NC} ${toggle_txt}"
+    [ $is_admin -eq 0 ] && echo -e "  ${C}2.${NC} 节点权限"
+    echo -e "  ${C}3.${NC} 套餐与到期设置"
+    echo -e "  ${C}4.${NC} 清零已用流量"
+    echo -e "  ${C}5.${NC} 补正 / 调整流量"
+    echo -e "  ${C}6.${NC} 一键续期"
+    echo -e "  ${C}7.${NC} 导出该用户配置"
+    echo -e "  ${D}0. 返回上一级${NC}"
+    ui_hr
+    read -r -p "请选择操作（回车返回）: " act
     case "${act:-}" in
       1)
         if user_db_user_is_enabled "$db_json" "$username"; then
-          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false | .users[$u].disabled_reason = "manual"')"
+          new_db="$(printf '%s\n' "$db_json" | jq --arg u "$username" '.users[$u].enabled = false | .users[$u].disabled_reason = "manual"')"
         else
-          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')"
+          new_db="$(printf '%s\n' "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')"
         fi
         user_manager_commit_edit "$db_json" "$new_db" edit "$username" || true
         ;;
@@ -4969,11 +5151,14 @@ user_manage_single() {
         ;;
       6)
         mode=edit
-        if user_expire_is_past "$(user_today_date)" "$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"; then mode=reset; fi
+        if user_expire_is_past "$(user_today_date)" "$(printf '%s\n' "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"; then mode=reset; fi
         new_db="$(user_renew_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
           user_manager_commit_edit "$db_json" "$new_db" "$mode" "$username" || true
         fi
+        ;;
+      7)
+        export_configs "$username" || true
         ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
@@ -5041,7 +5226,7 @@ user_delete_menu() {
   for username in "${names_to_delete[@]}"; do
     echo "  - $username"
   done
-  ask_confirm_yes "输入 YES 确认彻底删除，其它任意输入取消: " || { warn "已取消删除。"; pause; return 0; }
+  ask_confirm_yes "输入 yes 确认彻底删除（回车取消）: " || return 0
 
   new_db="$db_json"
   for username in "${names_to_delete[@]}"; do
@@ -5063,22 +5248,22 @@ user_manager_menu() {
     }
   fi
   while true; do
+    sync_user_usage_counters >/dev/null 2>&1 || true
     local db_json
     db_json="$(user_db_load)"
     clear
-    print_rect_title "用户管理"
+    print_rect_title "用户与流量管理"
     show_user_status_table "$db_json"
     echo -e "  ${C}1.${NC} 新增用户"
-    echo -e "  ${C}2.${NC} 管理用户"
-    echo -e "  ${C}3.${NC} 删除用户"
-    echo -e "  ${C}4.${NC} Telegram Bot 管理"
-    echo -e "  ${R}0.${NC} 返回主菜单"
-    read -r -p "请选择操作: " act
+    echo -e "  ${C}2.${NC} 管理用户 ${D}(启停 / 套餐 / 续期 / 权限 / 导链接)${NC}"
+    echo -e "  ${R}3.${NC} 删除用户"
+    echo -e "  ${D}0. 返回主菜单${NC}"
+    ui_hr
+    read -r -p "请选择操作（回车返回）: " act
     case "${act:-}" in
       1) user_add_menu || true ;;
       2) user_select_and_manage_menu || true ;;
       3) user_delete_menu || true ;;
-      4) telegram_bot_manager_menu || true ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
@@ -7567,25 +7752,26 @@ telegram_bot_manager_menu() {
     if [ "$enabled" != "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
       role_label="${role_label}（已停止）"
     fi
-    echo "当前模式：$role_label"
-    [ -n "$vps_name" ] && echo "本机名称：$vps_name"
-    [ -n "$center_url" ] && echo "主控地址：$center_url"
+    echo -e "  ${D}当前模式：${NC}${W}${role_label}${NC}"
+    [ -n "$vps_name" ] && echo -e "  ${D}本机名称：${NC}${vps_name}"
+    [ -n "$center_url" ] && echo -e "  ${D}主控地址：${NC}${center_url}"
     if [ "$role" = "center" ] && [ -n "$access_secret" ]; then
-      echo "接入密钥：$access_secret"
+      echo -e "  ${D}接入密钥：${NC}${C}${access_secret}${NC}"
     fi
-    echo -e "${B}--------------------------------------------------------${NC}"
-    echo "  1. 设置/启动TG Bot"
-    echo "  2. 生成用户绑定链接"
-    echo "  3. 通知测试"
+    ui_hr
+    echo -e "  ${C}1.${NC} 设置 / 启动 TG Bot"
+    echo -e "  ${C}2.${NC} 生成用户绑定链接"
+    echo -e "  ${C}3.${NC} 发送通知测试"
     if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
-      echo "  4. 重启/刷新TG Bot"
-      echo "  5. 卸载/停止TG Bot"
+      echo -e "  ${C}4.${NC} 重启 / 刷新 TG Bot"
+      echo -e "  ${R}5.${NC} 停止 / 卸载 TG Bot"
     else
-      echo "  4. 卸载/停止TG Bot"
+      echo -e "  ${R}4.${NC} 停止 / 卸载 TG Bot"
     fi
-    echo "  0. 返回上一级"
+    echo -e "  ${D}0. 返回主菜单${NC}"
+    ui_hr
     local act
-    read -r -p "请选择操作: " act
+    read -r -p "请选择操作（回车返回）: " act
     case "${act:-}" in
       1) tg_setup_menu ;;
       2) tg_generate_bind_link_menu ;;
@@ -7626,7 +7812,7 @@ WARP_SCRIPT_DOC_URL="https://gitlab.com/fscarmen/warp"
 WARP_SCRIPT_RAW_URL="https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
 
 warp_hr() {
-  echo -e "${B}--------------------------------------------------------${NC}"
+  ui_hr
 }
 
 warp_meta_json() {
@@ -7719,26 +7905,11 @@ warp_rule_remove_meta_by_files_json_from() {
 }
 
 warp_normalize_rule_file() {
-  local raw="${1:-}" value
-  value="$(printf '%s' "$raw" | tr -d '[:space:]')"
-  [ -n "$value" ] || return 1
-  if [[ "$value" == *"://"* ]]; then
-    err "请输入 rule-set 文件名，不要输入完整 URL。"
-    return 1
-  fi
-  [[ "$value" == geosite-* ]] || value="geosite-${value}"
-  [[ "$value" == *.srs ]] || value="${value}.srs"
-  [[ "$value" =~ ^geosite-[A-Za-z0-9._@!+-]+\.srs$ ]] || {
-    err "规则名格式无效：$value"
-    return 1
-  }
-  echo "$value"
+  split_rule_normalize_file "$@"
 }
 
 warp_validate_rule_file() {
-  local file="$1" url
-  url="$(warp_rule_url_for_file "$file")"
-  curl_maybe_warp -fsIL --connect-timeout 10 --max-time 20 "$url" >/dev/null 2>&1
+  split_rule_validate_remote_file "$@"
 }
 
 warp_rule_add_meta() {
@@ -7776,8 +7947,8 @@ warp_init_env() {
 
 warp_require_singbox() {
   has_cmd sing-box || {
-    err "未找到 sing-box，无法写入 WARP 分流策略。"
-    warn "请先在主菜单执行 1. 安装/更新 sing-box。"
+    err "尚未安装 sing-box，无法写入 WARP 分流规则。"
+    warn "请先在主菜单进入「7. 安装与卸载」安装 sing-box。"
     pause
     return 1
   }
@@ -7945,8 +8116,8 @@ warp_require_wireproxy_ready() {
   if warp_wireproxy_ready; then
     return 0
   fi
-  err "WireProxy SOCKS 未就绪，无法添加 WARP 分流。"
-  warn "请先按页面提示安装 fscarmen WARP 脚本的 WireProxy 方案。"
+  err "还没检测到本地 WARP 代理（WireProxy），暂时无法开启分流。"
+  warn "请先按页面提示安装 WireProxy 后再试。"
   pause
   return 1
 }
@@ -8275,8 +8446,9 @@ build_v2rayn_hysteria2_link() {
 
 # 从 meta 取某 hy2 节点的跳跃范围 "42310-45545"，没有返回空。
 hy2_export_hop_range() {
-  local tag="$1"
-  hy2_hop_range_from_meta "$(meta_load 2>/dev/null)" "$tag"
+  local tag="$1" meta_json="${2:-}"
+  [ -n "$meta_json" ] || meta_json="$(meta_load 2>/dev/null || echo '{}')"
+  hy2_hop_range_from_meta "$meta_json" "$tag"
 }
 
 # ---------- 导出上下文收集 ----------
@@ -8284,7 +8456,24 @@ hy2_export_hop_range() {
 export_collect_context() {
   local json="$1"
   local ip ws_domain vm_domain inventory
-  ip="$(get_public_ip)"
+  if [ -z "${_CACHED_PUBLIC_IP:-}" ] && [ -t 1 ] && [ -t 2 ]; then
+    local ip_tmp
+    ip_tmp="$(mktemp /tmp/sb-ip.XXXXXX)"
+    if run_with_spinner "正在获取服务器公网 IP..." bash -c '
+      ip=$(curl -s4 --max-time 3 --connect-timeout 2 ifconfig.me 2>/dev/null || true)
+      [ -z "$ip" ] && ip=$(curl -s4 --max-time 3 --connect-timeout 2 api.ipify.org 2>/dev/null || true)
+      [ -z "$ip" ] && ip=$(curl -s4 --max-time 3 --connect-timeout 2 icanhazip.com 2>/dev/null | tr -d "\n" || true)
+      printf "%s" "${ip:-IP}" > "'"$ip_tmp"'"
+    '; then
+      ip="$(cat "$ip_tmp" 2>/dev/null || echo IP)"
+      _CACHED_PUBLIC_IP="$ip"
+    else
+      ip="$(get_public_ip)"
+    fi
+    rm -f "$ip_tmp" >/dev/null 2>&1 || true
+  else
+    ip="$(get_public_ip)"
+  fi
   ws_domain="example.com"
   vm_domain="example.com"
   inventory="$(protocol_entry_inventory "$json")"
@@ -8304,20 +8493,54 @@ export_collect_context() {
 # ---------- 主导出函数 ----------
 
 export_configs() {
+  local filter_user="${1:-}"
   init_manager_env || { pause; return 0; }
   clear
-  local json ctx ip ws_domain vm_domain relay_users_nl
+  print_rect_title "导出节点配置"
+  local json meta_json ctx ip ws_domain vm_domain relay_users_nl
   local tag proto port sni path sid method server_p obfs_type obfs_pass
   local name uuid pass flow out_name pw_out target_file business_user safe_user reality_public_key v2rayn_link
   local hop_range qx_line clash_line
   json="$(config_load)"
+  meta_json="$(meta_load 2>/dev/null || echo '{}')"
+  [ -n "$meta_json" ] || meta_json='{}'
+
+  # 交互模式下若有普通多用户，允许按用户筛选导出，避免长篇刷屏
+  if [ -z "$filter_user" ] && [ -t 0 ] && [ -t 1 ] && user_db_exists; then
+    local -a biz_users=()
+    mapfile -t biz_users < <(user_db_load | jq -r '.users | keys[] | select(. != "admin")' 2>/dev/null)
+    if [ "${#biz_users[@]}" -gt 0 ]; then
+      echo ""
+      echo -e "  ${C}0.${NC} 导出全部（管理员直连/中转 + 全部用户）"
+      echo -e "  ${C}1.${NC} 仅导出管理员（直连 + 中转）"
+      local u_idx=2 u_name
+      for u_name in "${biz_users[@]}"; do
+        echo -e "  ${C}${u_idx}.${NC} 仅导出用户：${u_name}"
+        u_idx=$((u_idx + 1))
+      done
+      ui_hr
+      local scope_ans
+      read -r -p "请选择导出范围（回车导出全部）: " scope_ans
+      case "${scope_ans:-0}" in
+        0|"") filter_user="" ;;
+        1) filter_user="__admin__" ;;
+        *)
+          if [[ "$scope_ans" =~ ^[0-9]+$ ]] && [ "$scope_ans" -ge 2 ] && [ "$scope_ans" -le $((${#biz_users[@]} + 1)) ]; then
+            filter_user="${biz_users[$((scope_ans - 2))]}"
+          else
+            warn "编号无效，将导出全部配置。"
+            filter_user=""
+          fi
+          ;;
+      esac
+    fi
+  fi
+
   ctx="$(export_collect_context "$json")"
   IFS=$'\x01' read -r ip ws_domain vm_domain < <(
-    echo "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | join("\u0001")'
+    printf '%s\n' "$ctx" | jq -r '[.ip, .ws_domain, .vm_domain] | join("\u0001")'
   )
   relay_users_nl="$(relay_list_table "$json" | awk -F '\x01' 'NF >= 2 {print $2}' | awk 'NF' | sort -u)"
-
-  echo -e "${C}--- 节点配置导出 ---${NC}"
 
   local direct_tmp relay_tmp user_dir
   direct_tmp="$(mktemp)"
@@ -8329,204 +8552,230 @@ export_configs() {
   }
   trap '_export_cleanup; trap - RETURN' RETURN
 
-  while read -r inbound; do
-    IFS=$'\x01' read -r tag proto port sni path sid method server_p obfs_type obfs_pass < <(
-      echo "$inbound" | jq -r "${JQ_DETECT_PROTOCOL}"'
-        [(.tag // ""), detect_protocol, ((.listen_port // 0) | tostring),
-         (.tls.server_name // "www.icloud.com"), (.transport.path // "/"),
-         (.tls.reality.short_id[0] // ""), (.method // "2022-blake3-aes-128-gcm"),
-         (.password // ""), (.obfs.type // ""), (.obfs.password // "")] | join("\u0001")
-      '
-    )
+  # 单次 jq 展开全部 inbound × user，减少高频子进程 fork
+  while IFS=$'\x01' read -r tag proto port sni path sid method server_p obfs_type obfs_pass name uuid pass flow; do
+    [ -z "$name" ] && continue
+    out_name="$name"
 
-    while read -r user; do
-      IFS=$'\x01' read -r name uuid pass flow < <(
-        echo "$user" | jq -r '[(.name // .username // ""), (.uuid // ""), (.password // ""),
-          (.flow // "xtls-rprx-vision")] | join("\u0001")'
-      )
-      [ -z "$name" ] && continue
-      out_name="$name"
-
-      if [[ "$name" == *"@"* ]]; then
-        business_user="$(user_business_name "$name")"
-        safe_user="$(printf '%s' "$business_user" | tr '/ ' '__')"
-        target_file="${user_dir}/${safe_user}.tmp"
-      elif printf '%s\n' "$relay_users_nl" | grep -Fxq "$name"; then
+    if [[ "$name" == *"@"* ]]; then
+      business_user="$(user_business_name "$name")"
+      if [ -n "$filter_user" ] && [ "$filter_user" != "$business_user" ]; then
+        continue
+      fi
+      safe_user="$(printf '%s' "$business_user" | tr '/ ' '__')"
+      target_file="${user_dir}/${safe_user}.tmp"
+    else
+      if [ -n "$filter_user" ] && [ "$filter_user" != "__admin__" ]; then
+        continue
+      fi
+      if printf '%s\n' "$relay_users_nl" | grep -Fxq "$name"; then
         target_file="$relay_tmp"
       else
         target_file="$direct_tmp"
       fi
+    fi
 
-      case "$proto" in
-        vless-reality)
-          [ -z "$uuid" ] && continue
-          reality_public_key="$(meta_get_reality_public_key "$tag")"
-          [ -n "$reality_public_key" ] || reality_public_key="PUBLIC_KEY_MISSING"
-          {
-            echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: $port, uuid: $uuid, network: tcp, udp: true, tls: true, flow: ${flow}, servername: $sni, reality-opts: {public-key: $reality_public_key, short-id: '$sid'}, client-fingerprint: chrome}"
-            echo ""
-            echo -e " Quantumult X: vless=$ip:$port, method=none, password=$uuid, obfs=over-tls, obfs-host=$sni, reality-base64-pubkey=$reality_public_key, reality-hex-shortid=$sid, vless-flow=${flow}, udp-relay=true, tag=${out_name}"
-            echo ""
-            v2rayn_link="$(build_v2rayn_vless_reality_link "$ip" "$port" "$uuid" "$sni" "$reality_public_key" "$sid" "$flow" "$out_name")"
-            echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$target_file"
-          ;;
-        anytls)
-          [ -z "$pass" ] && continue
-          {
-            echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: ${out_name}, type: anytls, server: $ip, port: $port, password: \"${pass}\", client-fingerprint: chrome, udp: true, sni: \"${sni}\", alpn: [h2, http/1.1], skip-cert-verify: true}"
-            echo ""
-            echo -e " Quantumult X: anytls=${ip}:${port}, password=${pass}, over-tls=true, tls-host=${sni}, udp-relay=true, tag=${out_name}"
-            echo ""
-            v2rayn_link="$(build_v2rayn_anytls_link "$ip" "$port" "$pass" "$sni" "$out_name")"
-            echo -e " 通用链接: ${v2rayn_link}"
-            echo ""
-            echo -e " Surge: ${out_name} = anytls, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
-          } >> "$target_file"
-          ;;
-        shadowsocks)
-          [ -z "$pass" ] && continue
-          if [ -n "$server_p" ]; then pw_out="${server_p}:${pass}"; else pw_out="$pass"; fi
-          {
-            echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: \"${out_name}\", type: ss, server: $ip, port: ${port}, cipher: ${method}, password: \"${pw_out}\", udp: true}"
-            echo ""
-            echo -e " Quantumult X: shadowsocks=$ip:${port}, method=${method}, password=${pw_out}, udp-relay=true, tag=${out_name}"
-            echo ""
-            v2rayn_link="$(build_v2rayn_ss_link "$ip" "$port" "$method" "$pw_out" "$out_name")"
-            echo -e " 通用链接: ${v2rayn_link}"
-            echo ""
-            echo -e " Surge: ${out_name} = ss, ${ip}, ${port}, encrypt-method=${method}, password=${pw_out}, udp-relay=true"
-          } >> "$target_file"
-          ;;
-        trojan)
-          [ -z "$pass" ] && continue
-          {
-            echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: \"${out_name}\", type: trojan, server: $ip, port: ${port}, password: \"${pass}\", client-fingerprint: chrome, udp: true, sni: \"${sni}\", alpn: [h2, http/1.1], skip-cert-verify: true}"
-            echo ""
-            echo -e " Quantumult X: trojan=${ip}:${port}, password=${pass}, over-tls=true, tls-host=${sni}, tls-verification=false, fast-open=false, udp-relay=true, tag=${out_name}"
-            echo ""
-            v2rayn_link="$(build_v2rayn_trojan_link "$ip" "$port" "$pass" "$sni" "$out_name")"
-            echo -e " 通用链接: ${v2rayn_link}"
-            echo ""
-            echo -e " Surge: ${out_name} = trojan, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
-          } >> "$target_file"
-          ;;
-        vmess-ws)
-          [ -z "$uuid" ] && continue
-          {
-            echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: ${out_name}, type: vmess, server: $ip, port: 443, uuid: ${uuid}, alterId: 0, cipher: auto, udp: true, tls: true, network: ws, servername: ${vm_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${vm_domain}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}"
-            echo ""
-            echo -e " Quantumult X: vmess=$ip:443, method=chacha20-poly1305, password=${uuid}, obfs=wss, obfs-host=${vm_domain}, obfs-uri=${path}?ed=2048, fast-open=false, udp-relay=true, tag=${out_name}"
-            echo ""
-            v2rayn_link="$(build_v2rayn_vmess_ws_link "$ip" "$uuid" "$vm_domain" "${path}?ed=2048" "$out_name")"
-            echo -e " 通用链接: ${v2rayn_link}"
-            echo ""
-            echo -e " Surge: ${out_name} = vmess, ${ip}, 443, username=${uuid}, tls=true, vmess-aead=true, ws=true, ws-path=${path}?ed=2048, sni=${vm_domain}, ws-headers=Host:${vm_domain}, skip-cert-verify=false, udp-relay=true, tfo=false"
-          } >> "$target_file"
-          ;;
-        vless-ws)
-          [ -z "$uuid" ] && continue
-          {
-            echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: 443, uuid: ${uuid}, udp: true, tls: true, network: ws, servername: ${ws_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${ws_domain}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}"
-            echo ""
-            echo -e " Quantumult X: vless=$ip:443,method=none,password=${uuid},obfs=wss,obfs-host=${ws_domain},obfs-uri=${path}?ed=2048,fast-open=false,udp-relay=true,tag=${out_name}"
-            echo ""
-            v2rayn_link="$(build_v2rayn_vless_ws_link "$ip" "$uuid" "$ws_domain" "${path}?ed=2048" "$out_name")"
-            echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$target_file"
-          ;;
-        hysteria2)
-          [ -z "$pass" ] && continue
-          hop_range="$(hy2_export_hop_range "$tag")"
-          {
-            echo -e "\n${W}[${out_name}]${NC}"
-            clash_line=" Clash: - {name: ${out_name}, type: hysteria2, server: $ip, port: $port, password: $pass, sni: $sni, skip-cert-verify: true"
-            if [ -n "$obfs_type" ]; then
-              clash_line="${clash_line}, obfs: ${obfs_type}, obfs-password: ${obfs_pass}"
-            fi
-            if [ -n "$hop_range" ]; then
-              clash_line="${clash_line}, ports: \"${hop_range}\", hop-interval: 30"
-            fi
-            clash_line="${clash_line}}"
-            echo -e "$clash_line"
-            echo ""
-            # QX：基础端口就是监听端口，跳跃范围单独用 port-hopping 写
-            qx_line=" Quantumult X: hysteria2=${ip}:${port}, password=${pass}, tls-host=${sni}, tls-verification=false, udp-relay=true"
-            if [ -n "$hop_range" ]; then
-              qx_line="${qx_line}, port-hopping=${hop_range}, port-hopping-interval=30"
-            fi
-            if [ "$obfs_type" = "gecko" ]; then
-              qx_line="${qx_line}, gecko-password=${obfs_pass}"
-            elif [ "$obfs_type" = "salamander" ]; then
-              qx_line="${qx_line}, salamander-password=${obfs_pass}"
-            fi
-            qx_line="${qx_line}, tag=${out_name}"
-            echo -e "$qx_line"
-            echo ""
-            if [ -n "$hop_range" ]; then
-              v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$hop_range" "$pass" "$sni" "$obfs_type" "$obfs_pass" "$out_name")"
-            else
-              v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$port" "$pass" "$sni" "$obfs_type" "$obfs_pass" "$out_name")"
-            fi
-            echo -e " 通用链接: ${v2rayn_link}"
-          } >> "$target_file"
-          ;;
-        tuic)
-          [ -z "$uuid" ] && continue
-          [ -z "$pass" ] && continue
-          {
-            echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " Clash: - {name: ${out_name}, type: tuic, server: $ip, port: $port, uuid: $uuid, password: $pass, alpn: [h3], disable-sni: false, reduce-rtt: false, udp-relay-mode: native, congestion-controller: bbr, skip-cert-verify: true, sni: $sni}"
-            echo ""
-            v2rayn_link="$(build_v2rayn_tuic_link "$ip" "$port" "$uuid" "$pass" "$sni" "$out_name")"
-            echo -e " 通用链接: ${v2rayn_link}"
-            echo ""
-            echo -e " Surge: ${out_name} = tuic-v5, ${ip}, ${port}, password=${pass}, sni=${sni}, uuid=${uuid}, alpn=h3, ecn=true"
-          } >> "$target_file"
-          ;;
-        socks)
-          [ -z "$name" ] && continue
-          [ -z "$pass" ] && continue
-          {
-            echo -e "\n${W}[${out_name}]${NC}"
-            echo -e " 参数: server=${ip}  port=${port}  username=${name}  password=${pass}"
-          } >> "$target_file"
-          ;;
-      esac
-    done < <(echo "$inbound" | jq -c '.users[]?')
-  done < <(echo "$json" | jq -c "${JQ_PROTOCOL_SORT}"'[.inbounds[]?] | sort_by(protocol_sort_index(.tag // "")) | .[]')
+    case "$proto" in
+      vless-reality)
+        [ -z "$uuid" ] && continue
+        reality_public_key="$(printf '%s\n' "$meta_json" | jq -r --arg t "$tag" '.[$t].public_key // ""')"
+        [ -n "$reality_public_key" ] || reality_public_key="PUBLIC_KEY_MISSING"
+        {
+          echo -e "\n${W}[${out_name}]${NC}"
+          echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: $port, uuid: $uuid, network: tcp, udp: true, tls: true, flow: ${flow}, servername: $sni, reality-opts: {public-key: $reality_public_key, short-id: '$sid'}, client-fingerprint: chrome}"
+          echo ""
+          echo -e " Quantumult X: vless=$ip:$port, method=none, password=$uuid, obfs=over-tls, obfs-host=$sni, reality-base64-pubkey=$reality_public_key, reality-hex-shortid=$sid, vless-flow=${flow}, udp-relay=true, tag=${out_name}"
+          echo ""
+          v2rayn_link="$(build_v2rayn_vless_reality_link "$ip" "$port" "$uuid" "$sni" "$reality_public_key" "$sid" "$flow" "$out_name")"
+          echo -e " 通用链接: ${v2rayn_link}"
+        } >> "$target_file"
+        ;;
+      anytls)
+        [ -z "$pass" ] && continue
+        {
+          echo -e "\n${W}[${out_name}]${NC}"
+          echo -e " Clash: - {name: ${out_name}, type: anytls, server: $ip, port: $port, password: \"${pass}\", client-fingerprint: chrome, udp: true, sni: \"${sni}\", alpn: [h2, http/1.1], skip-cert-verify: true}"
+          echo ""
+          echo -e " Quantumult X: anytls=${ip}:${port}, password=${pass}, over-tls=true, tls-host=${sni}, udp-relay=true, tag=${out_name}"
+          echo ""
+          v2rayn_link="$(build_v2rayn_anytls_link "$ip" "$port" "$pass" "$sni" "$out_name")"
+          echo -e " 通用链接: ${v2rayn_link}"
+          echo ""
+          echo -e " Surge: ${out_name} = anytls, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
+        } >> "$target_file"
+        ;;
+      shadowsocks)
+        [ -z "$pass" ] && continue
+        if [ -n "$server_p" ]; then pw_out="${server_p}:${pass}"; else pw_out="$pass"; fi
+        {
+          echo -e "\n${W}[${out_name}]${NC}"
+          echo -e " Clash: - {name: \"${out_name}\", type: ss, server: $ip, port: ${port}, cipher: ${method}, password: \"${pw_out}\", udp: true}"
+          echo ""
+          echo -e " Quantumult X: shadowsocks=$ip:${port}, method=${method}, password=${pw_out}, udp-relay=true, tag=${out_name}"
+          echo ""
+          v2rayn_link="$(build_v2rayn_ss_link "$ip" "$port" "$method" "$pw_out" "$out_name")"
+          echo -e " 通用链接: ${v2rayn_link}"
+          echo ""
+          echo -e " Surge: ${out_name} = ss, ${ip}, ${port}, encrypt-method=${method}, password=${pw_out}, udp-relay=true"
+        } >> "$target_file"
+        ;;
+      trojan)
+        [ -z "$pass" ] && continue
+        {
+          echo -e "\n${W}[${out_name}]${NC}"
+          echo -e " Clash: - {name: \"${out_name}\", type: trojan, server: $ip, port: ${port}, password: \"${pass}\", client-fingerprint: chrome, udp: true, sni: \"${sni}\", alpn: [h2, http/1.1], skip-cert-verify: true}"
+          echo ""
+          echo -e " Quantumult X: trojan=${ip}:${port}, password=${pass}, over-tls=true, tls-host=${sni}, tls-verification=false, fast-open=false, udp-relay=true, tag=${out_name}"
+          echo ""
+          v2rayn_link="$(build_v2rayn_trojan_link "$ip" "$port" "$pass" "$sni" "$out_name")"
+          echo -e " 通用链接: ${v2rayn_link}"
+          echo ""
+          echo -e " Surge: ${out_name} = trojan, ${ip}, ${port}, password=${pass}, skip-cert-verify=true, sni=${sni}"
+        } >> "$target_file"
+        ;;
+      vmess-ws)
+        [ -z "$uuid" ] && continue
+        {
+          echo -e "\n${W}[${out_name}]${NC}"
+          echo -e " Clash: - {name: ${out_name}, type: vmess, server: $ip, port: 443, uuid: ${uuid}, alterId: 0, cipher: auto, udp: true, tls: true, network: ws, servername: ${vm_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${vm_domain}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}"
+          echo ""
+          echo -e " Quantumult X: vmess=$ip:443, method=chacha20-poly1305, password=${uuid}, obfs=wss, obfs-host=${vm_domain}, obfs-uri=${path}?ed=2048, fast-open=false, udp-relay=true, tag=${out_name}"
+          echo ""
+          v2rayn_link="$(build_v2rayn_vmess_ws_link "$ip" "$uuid" "$vm_domain" "${path}?ed=2048" "$out_name")"
+          echo -e " 通用链接: ${v2rayn_link}"
+          echo ""
+          echo -e " Surge: ${out_name} = vmess, ${ip}, 443, username=${uuid}, tls=true, vmess-aead=true, ws=true, ws-path=${path}?ed=2048, sni=${vm_domain}, ws-headers=Host:${vm_domain}, skip-cert-verify=false, udp-relay=true, tfo=false"
+        } >> "$target_file"
+        ;;
+      vless-ws)
+        [ -z "$uuid" ] && continue
+        {
+          echo -e "\n${W}[${out_name}]${NC}"
+          echo -e " Clash: - {name: ${out_name}, type: vless, server: $ip, port: 443, uuid: ${uuid}, udp: true, tls: true, network: ws, servername: ${ws_domain}, ws-opts: {path: \"${path}\", headers: {Host: ${ws_domain}}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}"
+          echo ""
+          echo -e " Quantumult X: vless=$ip:443,method=none,password=${uuid},obfs=wss,obfs-host=${ws_domain},obfs-uri=${path}?ed=2048,fast-open=false,udp-relay=true,tag=${out_name}"
+          echo ""
+          v2rayn_link="$(build_v2rayn_vless_ws_link "$ip" "$uuid" "$ws_domain" "${path}?ed=2048" "$out_name")"
+          echo -e " 通用链接: ${v2rayn_link}"
+        } >> "$target_file"
+        ;;
+      hysteria2)
+        [ -z "$pass" ] && continue
+        hop_range="$(hy2_export_hop_range "$tag" "$meta_json")"
+        {
+          echo -e "\n${W}[${out_name}]${NC}"
+          clash_line=" Clash: - {name: ${out_name}, type: hysteria2, server: $ip, port: $port, password: $pass, sni: $sni, skip-cert-verify: true"
+          if [ -n "$obfs_type" ]; then
+            clash_line="${clash_line}, obfs: ${obfs_type}, obfs-password: ${obfs_pass}"
+          fi
+          if [ -n "$hop_range" ]; then
+            clash_line="${clash_line}, ports: \"${hop_range}\", hop-interval: 30"
+          fi
+          clash_line="${clash_line}}"
+          echo -e "$clash_line"
+          echo ""
+          qx_line=" Quantumult X: hysteria2=${ip}:${port}, password=${pass}, tls-host=${sni}, tls-verification=false, udp-relay=true"
+          if [ -n "$hop_range" ]; then
+            qx_line="${qx_line}, port-hopping=${hop_range}, port-hopping-interval=30"
+          fi
+          if [ "$obfs_type" = "gecko" ]; then
+            qx_line="${qx_line}, gecko-password=${obfs_pass}"
+          elif [ "$obfs_type" = "salamander" ]; then
+            qx_line="${qx_line}, salamander-password=${obfs_pass}"
+          fi
+          qx_line="${qx_line}, tag=${out_name}"
+          echo -e "$qx_line"
+          echo ""
+          if [ -n "$hop_range" ]; then
+            v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$hop_range" "$pass" "$sni" "$obfs_type" "$obfs_pass" "$out_name")"
+          else
+            v2rayn_link="$(build_v2rayn_hysteria2_link "$ip" "$port" "$pass" "$sni" "$obfs_type" "$obfs_pass" "$out_name")"
+          fi
+          echo -e " 通用链接: ${v2rayn_link}"
+        } >> "$target_file"
+        ;;
+      tuic)
+        [ -z "$uuid" ] && continue
+        [ -z "$pass" ] && continue
+        {
+          echo -e "\n${W}[${out_name}]${NC}"
+          echo -e " Clash: - {name: ${out_name}, type: tuic, server: $ip, port: $port, uuid: $uuid, password: $pass, alpn: [h3], disable-sni: false, reduce-rtt: false, udp-relay-mode: native, congestion-controller: bbr, skip-cert-verify: true, sni: $sni}"
+          echo ""
+          v2rayn_link="$(build_v2rayn_tuic_link "$ip" "$port" "$uuid" "$pass" "$sni" "$out_name")"
+          echo -e " 通用链接: ${v2rayn_link}"
+          echo ""
+          echo -e " Surge: ${out_name} = tuic-v5, ${ip}, ${port}, password=${pass}, sni=${sni}, uuid=${uuid}, alpn=h3, ecn=true"
+        } >> "$target_file"
+        ;;
+      socks)
+        [ -z "$name" ] && continue
+        [ -z "$pass" ] && continue
+        {
+          echo -e "\n${W}[${out_name}]${NC}"
+          echo -e " 参数: server=${ip}  port=${port}  username=${name}  password=${pass}"
+        } >> "$target_file"
+        ;;
+    esac
+  done < <(
+    printf '%s\n' "$json" | jq -r "${JQ_SHARED}"'
+      [.inbounds[]?]
+      | sort_by(protocol_sort_index(.tag // ""))
+      | .[]
+      | . as $in
+      | ($in | detect_protocol) as $proto
+      | ($in.users // [])[]?
+      | [
+          ($in.tag // ""),
+          $proto,
+          (($in.listen_port // 0) | tostring),
+          ($in.tls.server_name // "www.icloud.com"),
+          ($in.transport.path // "/"),
+          ($in.tls.reality.short_id[0] // ""),
+          ($in.method // "2022-blake3-aes-128-gcm"),
+          ($in.password // ""),
+          ($in.obfs.type // ""),
+          ($in.obfs.password // ""),
+          (.name // .username // ""),
+          (.uuid // ""),
+          (.password // ""),
+          (.flow // "xtls-rprx-vision")
+        ] | join("\u0001")
+    '
+  )
 
-  echo -e "\n${C}直连节点${NC}"
-  if [ -s "$direct_tmp" ]; then
-    cat "$direct_tmp"
-  else
-    echo -e "  ${Y}当前没有直连节点。${NC}"
+  if [ -z "$filter_user" ] || [ "$filter_user" = "__admin__" ]; then
+    echo -e "\n${C}直连节点${NC}"
+    if [ -s "$direct_tmp" ]; then
+      cat "$direct_tmp"
+    else
+      echo -e "  ${D}暂无直连节点${NC}"
+    fi
+
+    if [ -s "$relay_tmp" ] || [ -z "$filter_user" ]; then
+      echo -e "\n${C}中转节点${NC}"
+      if [ -s "$relay_tmp" ]; then
+        cat "$relay_tmp"
+      else
+        echo -e "  ${D}暂无中转节点${NC}"
+      fi
+    fi
   fi
 
-  echo -e "\n${C}中转节点${NC}"
-  if [ -s "$relay_tmp" ]; then
-    cat "$relay_tmp"
-  else
-    echo -e "  ${Y}当前没有中转节点。${NC}"
-  fi
+  if [ "$filter_user" != "__admin__" ]; then
+    local user_file printed=0 user_name
+    while IFS= read -r -d '' user_file; do
+      printed=1
+      user_name="$(basename "$user_file" .tmp)"
+      echo -e "\n${C}用户：${user_name}${NC}"
+      cat "$user_file"
+    done < <(find "$user_dir" -maxdepth 1 -type f -name '*.tmp' -print0 | sort -z)
 
-  local user_file printed=0 user_name
-  while IFS= read -r -d '' user_file; do
-    printed=1
-    user_name="$(basename "$user_file" .tmp)"
-    echo -e "\n${C}${user_name}节点${NC}"
-    cat "$user_file"
-  done < <(find "$user_dir" -maxdepth 1 -type f -name '*.tmp' -print0 | sort -z)
-
-  if [ "$printed" -eq 0 ]; then
-    echo -e "\n${C}用户节点${NC}"
-    echo -e "  ${Y}当前没有用户节点。${NC}"
+    if [ "$printed" -eq 0 ] && [ -n "$filter_user" ]; then
+      echo -e "\n${Y}用户 ${filter_user} 暂无可用节点（请确认已分配节点权限且已启用）。${NC}"
+    elif [ "$printed" -eq 0 ]; then
+      echo -e "\n${C}用户节点${NC}"
+      echo -e "  ${D}暂无其他用户节点${NC}"
+    fi
   fi
 
   echo ""
@@ -8544,10 +8793,7 @@ export_configs() {
 
 # ---------- 依赖安装 ----------
 
-ensure_deps_for_installer() {
-  require_root
-  [ "$PKG_MANAGER" = "unknown" ] && { err "未找到受支持的包管理器（apt-get 或 apk）。"; exit 1; }
-  say "安装必要依赖..."
+_install_core_deps_quiet() {
   local _PKG_INSTALL_QUIET=1
   install_pkg curl
   install_pkg jq
@@ -8557,6 +8803,12 @@ ensure_deps_for_installer() {
     apt) install_pkg ca-certificates; install_pkg gnupg; install_pkg gzip; install_pkg util-linux ;;
     apk) install_pkg ca-certificates; install_pkg gcompat; install_pkg flock ;;
   esac
+}
+
+ensure_deps_for_installer() {
+  require_root
+  [ "$PKG_MANAGER" = "unknown" ] && { err "不支持的系统（仅支持 Debian/Ubuntu 和 Alpine）。"; exit 1; }
+  run_with_spinner "正在检查并安装系统依赖..." _install_core_deps_quiet
 }
 
 version_ge() {
@@ -9023,23 +9275,35 @@ prepare_script_runtime() {
 
 install_or_update_singbox() {
   clear
-  print_rect_title "sing-box 安装/更新"
+  print_rect_title "安装 / 更新 sing-box"
 
-  ensure_deps_for_installer
+  ui_step 1 5 "准备环境与检查版本"
+  ensure_deps_for_installer || { pause; return 1; }
 
-  local arch file tag latest_ver inst ans tmp_dir base_url download_url sha_url managed_env
+  local arch file tag latest_ver inst tmp_dir base_url download_url sha_url managed_env
   arch="$(uname -m)"
   case "$arch" in
     x86_64) file="sing-box-linux-amd64.tar.gz" ;;
     aarch64|arm64) file="sing-box-linux-arm64.tar.gz" ;;
     *)
-      err "不支持的架构：$arch"
+      err "不支持的 CPU 架构：$arch（仅支持 amd64 / arm64）"
       pause
       return 1
       ;;
   esac
 
-  tag="$(get_release_latest_tag)"
+  local tag_tmp
+  tag_tmp="$(mktemp /tmp/sb-tag.XXXXXX)" || { err "创建临时文件失败。"; pause; return 1; }
+  if ! run_with_spinner "正在查询最新可用版本..." bash -c '
+    curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/'"${SINGBOX_RELEASE_REPO:-Tangfffyx/sing-box}"'/releases/latest" 2>/dev/null | jq -r ".tag_name // empty" > "'"$tag_tmp"'"
+  '; then
+    rm -f "$tag_tmp"
+    err "获取最新版本失败，请检查服务器网络后再试。"
+    pause
+    return 1
+  fi
+  tag="$(cat "$tag_tmp" 2>/dev/null || true)"
+  rm -f "$tag_tmp"
   latest_ver="$(normalize_release_tag "$tag")"
 
   refresh_command_cache
@@ -9051,44 +9315,37 @@ install_or_update_singbox() {
   fi
 
   if [ -z "${latest_ver:-}" ]; then
-    err "未获取到 GitHub Release 最新版本。"
+    err "未能获取到最新版本号，请稍后重试。"
     pause
     return 1
   fi
 
   if [ "${managed_env}" != "1" ] && singbox_command_exists; then
-    warn "检测到已有非本脚本安装的 sing-box 环境，请先执行“卸载 sing-box”后再安装。"
+    warn "检测到已有其他方式安装的 sing-box，请先卸载后再使用本脚本安装。"
     pause >&2
     return 0
   fi
 
+  echo ""
   if [ "${managed_env}" = "1" ]; then
-    echo -e "当前版本：${G}${inst:-未知}${NC}"
-    echo -e "最新版本：${G}${latest_ver}${NC}"
+    param_echo "当前版本" "${inst:-未知}"
+    param_echo "最新版本" "${latest_ver}"
+    echo ""
     if [ -n "${inst:-}" ] && version_ge "$inst" "$latest_ver"; then
       if is_install_complete; then
         config_apply "$(config_load)" || { pause; return 1; }
-        ok "当前已是最新版本。"
+        ok "当前已是最新版本，无需更新。"
         pause
         return 0
       fi
-      warn "版本号匹配但部分组件缺失。"
-      read -r -p "是否重新安装以补齐组件？[Y/n]: " ans
-      case "${ans:-Y}" in
-        [Nn]*) return 0 ;;
-      esac
+      warn "版本已是最新，但检测到部分运行组件缺失。"
+      ask_confirm_default_yes "是否立即修复补齐？[Y/n]: " || return 0
     elif [ -n "${inst:-}" ]; then
-      read -r -p "检测到新版本，是否升级？[Y/n]: " ans
-      case "${ans:-Y}" in
-        [Nn]*) return 0 ;;
-      esac
-    else
-      echo -e "当前状态：${Y}本脚本环境，但未识别到已安装版本${NC}"
-      echo -e "将安装版本：${G}${latest_ver}${NC}"
+      ask_confirm_default_yes "发现新版本 ${latest_ver}，是否现在升级？[Y/n]: " || return 0
     fi
   else
-    echo -e "当前状态：${Y}未安装 sing-box${NC}"
-    echo -e "将安装版本：${G}${latest_ver}${NC}"
+    param_echo "准备安装" "sing-box ${latest_ver}（内置流量统计支持）"
+    echo ""
   fi
 
   if [ "${managed_env}" = "1" ] && [ -x "$SINGBOX_BIN" ]; then
@@ -9104,87 +9361,100 @@ install_or_update_singbox() {
   download_url="${base_url}/${file}"
   sha_url="${base_url}/sha256sum.txt"
 
-  say "下载 sing-box..."
-  if ! download_file "$download_url" "$tmp_dir/$file" 20 3; then
+  ui_step 2 5 "下载 sing-box 内核"
+  if ! download_file "$download_url" "$tmp_dir/$file" 20 3 "下载 sing-box"; then
     rm -rf "$tmp_dir"
-    err "下载失败，请检查网络或稍后重试。"
+    err "内核下载失败，请检查网络连接后重试。"
     pause
     return 1
   fi
 
+  ui_step 3 5 "校验与解压安装包"
   if curl -fsSL --connect-timeout 20 --retry 3 "$sha_url" -o "$tmp_dir/sha256sum.txt" >/dev/null 2>&1; then
+    local expected_sha actual_sha
     expected_sha="$(awk -v f="$file" '{n=$2; sub(/^.*\//,"",n); if (n==f) {print $1; exit}}' "$tmp_dir/sha256sum.txt")"
     actual_sha="$(sha256sum "$tmp_dir/$file" | awk '{print $1}')"
     if [ -z "$expected_sha" ] || [ "$expected_sha" != "$actual_sha" ]; then
       rm -rf "$tmp_dir"
-      err "校验失败。"
+      err "安装包校验不通过，文件可能损坏，已取消安装。"
       pause
       return 1
     fi
+    ok "安装包校验通过"
   else
     warn "未获取到校验文件。"
-    if ! ask_confirm_yes "输入 YES 确认跳过校验继续安装，其它任意输入取消: "; then
+    if ! ask_confirm_yn "是否跳过校验继续安装？[y/N]: "; then
       rm -rf "$tmp_dir"
-      err "已取消安装。"
-      pause
-      return 1
+      return 0
     fi
   fi
 
   tar -xzf "$tmp_dir/$file" -C "$tmp_dir" || {
     rm -rf "$tmp_dir"
-    err "解压失败。"
+    err "安装包解压失败。"
     pause
     return 1
   }
 
   [ -f "$tmp_dir/sing-box" ] || {
     rm -rf "$tmp_dir"
-    err "安装包中未找到 sing-box 可执行文件。"
+    err "安装包中未找到 sing-box 主程序。"
     pause
     return 1
   }
 
-  # staging 验证：在替换正式位置之前先验证 with_v2ray_api，避免坏二进制进入 $SINGBOX_BIN
   chmod +x "$tmp_dir/sing-box" 2>/dev/null || true
   if ! "$tmp_dir/sing-box" version 2>/dev/null | grep -q 'with_v2ray_api'; then
     rm -rf "$tmp_dir"
-    err "下载的 sing-box 未检测到 with_v2ray_api。"
+    err "下载的内核不支持流量统计，已取消替换。"
     if [ "$PKG_MANAGER" = "apk" ]; then
-      warn "Alpine 环境提示：若报 'cannot execute' 错误，请手动执行：apk add gcompat"
+      warn "Alpine 系统如果提示无法运行，请先执行：apk add gcompat"
     fi
     pause
     return 1
   fi
 
+  ui_step 4 5 "准备流量统计组件"
   if ! ensure_grpcurl_logged || ! ensure_v2ray_api_proto_files; then
     rm -rf "$tmp_dir"
-    err "统计组件未就绪，已取消升级。"
+    err "流量统计组件准备失败，已取消安装。"
     pause
     return 1
   fi
-  if ! with_manager_lock install_candidate_singbox "$tmp_dir/sing-box" "$tag"; then
+
+  ui_step 5 5 "写入内核并启动服务"
+  if ! run_with_spinner "正在部署内核并验证服务运行..." with_manager_lock install_candidate_singbox "$tmp_dir/sing-box" "$tag"; then
     rm -rf "$tmp_dir"
     pause
     return 1
   fi
   rm -rf "$tmp_dir"
-  # 内核事务已提交；可重试的菜单/cron 初始化不影响已验证的内核。
+
   ensure_sb_shortcut || true
-  ensure_user_manager_ready || warn "用户数据库初始化失败，用户管理菜单进入时会重试初始化。"
-  install_periodic_sync_cron || warn "cron 定时任务安装失败：实时同步（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
-  install_daily_maintenance_cron || warn "cron 定时任务安装失败：日常维护（环境: ${PKG_MANAGER}/${INIT_SYSTEM}）。is_install_complete 探针会引导后续修复。"
-  # 清理 6.0.8 及以前残留的 4 个老 cron（墓志铭入口让它们不出错，但应清掉避免无意义触发）
+  ensure_user_manager_ready || warn "用户数据初始化未完成，进入用户管理时会自动重试。"
+  install_periodic_sync_cron || warn "实时同步定时任务未能自动写入，稍后可在“安装与更新”中修复。"
+  install_daily_maintenance_cron || warn "日常维护定时任务未能自动写入，稍后可在“安装与更新”中修复。"
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
   remove_tg_agent_cron || true
   remove_upstream_refresh_cron || true
   refresh_upstream_tag_cache "$tag" >/dev/null 2>&1 || true
-  user_manager_background_sync || warn "用户管理后台同步初始化失败。下次 periodic-sync cron 会重试。"
+  user_manager_background_sync >/dev/null 2>&1 || true
   tg_refresh_after_singbox_install || true
 
-  ok "安装完成。"
-  pause
+  echo ""
+  ok "sing-box ${latest_ver} 安装完成！随时输入 s 可重新打开面板。"
+  local inbound_cnt
+  inbound_cnt="$(config_load 2>/dev/null | jq '.inbounds | length' 2>/dev/null || echo 0)"
+  if [ "${inbound_cnt:-0}" -eq 0 ]; then
+    echo ""
+    if ask_confirm_default_yes "当前还没有任何节点，是否现在添加第一个节点？[Y/n]: "; then
+      protocol_manager || true
+      return 0
+    fi
+  else
+    pause
+  fi
 }
 
 # 调用方持管理锁。候选文件在正式路径之外完成校验；保留最近一次成功版本。
@@ -9431,47 +9701,18 @@ wireproxy_warp_environment_present() {
   return 1
 }
 
-print_full_cleanup_hint() {
-  echo
-  echo "如需彻底删除脚本与相关配置，可在退出脚本后手动执行："
-  echo "rm -f /root/sb.sh"
-  echo "rm -f /usr/local/bin/s"
-  echo "rm -rf /etc/sing-box-manager"
-  echo "rm -rf /etc/sing-box"
-  echo "rm -rf /var/log/sing-box"
-  echo "rm -f /var/lock/singbox-manager.lock /var/lock/singbox-tg-agent.lock"
-  echo "rm -rf /var/lock/singbox-tg-agent.lock.d"
-}
-
 print_wireproxy_cleanup_hint_if_present() {
   wireproxy_warp_environment_present || return 0
-  echo
-  echo "检测到 WireProxy/WARP 仍存在。"
-  echo
-  echo "如需卸载 WARP，可在退出脚本后执行："
-  echo "wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
-  echo "bash menu.sh u"
+  echo ""
+  warn "检测到外部安装的 WARP（WireProxy）仍在运行，如需一并卸载可执行："
+  echo "  wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh && bash menu.sh u"
 }
 
-uninstall_singbox_keep_config() {
-  require_root
-  clear
-  print_rect_title "卸载 sing-box"
-  echo "该操作将停止并删除 sing-box 运行组件："
-  echo "  - sing-box 服务"
-  echo "  - sing-box 主程序"
-  echo "  - 流量统计/日志维护定时任务"
-  echo "  - TG Bot 服务与上报任务"
-  echo
-  echo "以下内容会保留："
-  echo "  - sing-box 配置：/etc/sing-box"
-  echo "  - 用户数据与 TG 配置：/etc/sing-box-manager"
-  echo "  - 日志文件：/var/log/sing-box"
-  echo "  - 管理脚本入口：/root/sb.sh、/usr/local/bin/s"
-  echo
-  ask_confirm_yes "输入 YES 确认卸载，其它任意输入取消: " || { warn "已取消卸载。"; pause; return 0; }
-
-  sync_user_usage_counters || true
+_uninstall_core_runtime() {
+  local keep_data="${1:-1}"
+  if [ "$keep_data" = "1" ]; then
+    sync_user_usage_counters || true
+  fi
   remove_periodic_sync_cron || true
   remove_daily_maintenance_cron || true
   remove_user_watch_cron || true
@@ -9480,8 +9721,14 @@ uninstall_singbox_keep_config() {
   remove_upstream_refresh_cron || true
   rm -f "$UPSTREAM_TAG_CACHE_FILE" >/dev/null 2>&1 || true
   tg_stop_center_service || true
-  tg_mark_disabled_keep_config || true
+  if [ "$keep_data" = "1" ]; then
+    tg_mark_disabled_keep_config || true
+  fi
   remove_all_singbox_service_units
+  # 清理 Hysteria2 端口跳跃防火墙规则与开机自恢复服务
+  if [ "$keep_data" != "1" ]; then
+    hy2_hop_remove_all_from_meta 2>/dev/null || true
+  fi
   # 清理官方包可能创建的系统用户/组
   if has_cmd deluser; then
     deluser --system sing-box >/dev/null 2>&1 || true
@@ -9493,14 +9740,12 @@ uninstall_singbox_keep_config() {
   else
     groupdel sing-box >/dev/null 2>&1 || true
   fi
-  rm -f "$SINGBOX_BIN" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
-  rm -rf /var/tmp/sb-install.* >/dev/null 2>&1 || true
+  rm -f "$SINGBOX_BIN" "${SINGBOX_BIN}.bak" /usr/bin/sing-box "$SINGBOX_VERSION_STAMP" "$GRPCURL_BIN" >/dev/null 2>&1 || true
+  rm -rf /var/tmp/sb-install.* /tmp/.sb_pkg_updated >/dev/null 2>&1 || true
   refresh_command_cache
   if pkg_installed sing-box || pkg_installed sing-box-beta; then
     case "$PKG_MANAGER" in
       apt)
-        pkg_installed sing-box && apt-get remove -y sing-box >/dev/null 2>&1 || true
-        pkg_installed sing-box-beta && apt-get remove -y sing-box-beta >/dev/null 2>&1 || true
         pkg_installed sing-box && apt-get purge -y sing-box >/dev/null 2>&1 || true
         pkg_installed sing-box-beta && apt-get purge -y sing-box-beta >/dev/null 2>&1 || true
         ;;
@@ -9511,10 +9756,65 @@ uninstall_singbox_keep_config() {
     esac
   fi
   refresh_command_cache
-  ok "卸载完成，配置和用户数据已保留。"
-  print_full_cleanup_hint
-  print_wireproxy_cleanup_hint_if_present
-  pause
+}
+
+uninstall_singbox_keep_config() {
+  require_root
+  clear
+  print_rect_title "卸载 sing-box"
+  echo ""
+  echo -e "  ${C}1.${NC} 仅卸载程序（保留节点配置与用户数据，方便重装）"
+  echo -e "  ${R}2.${NC} 彻底卸载并清空全部数据（删除配置、用户、日志、防火墙规则与脚本）"
+  echo -e "  ${D}0. 返回上一级${NC}"
+  ui_hr
+  local mode
+  read -r -p "请选择卸载方式（回车返回）: " mode
+  case "${mode:-}" in
+    1)
+      echo ""
+      ask_confirm_yn "确认仅卸载 sing-box 程序并保留配置数据吗？[y/N]: " || return 0
+      run_with_spinner "正在停止服务并卸载程序..." _uninstall_core_runtime 1
+      ok "卸载完成，节点配置与用户数据已保留。"
+      print_wireproxy_cleanup_hint_if_present
+      pause
+      ;;
+    2)
+      echo ""
+      warn "彻底卸载将永久删除所有节点配置、用户与流量记录、TG 配置、日志、端口跳跃规则及本脚本。"
+      ask_confirm_yes "输入 yes 确认彻底卸载（回车取消）: " || return 0
+      run_with_spinner "正在清理服务、防火墙规则与全部数据..." _uninstall_core_runtime 0
+      rm -rf /etc/sing-box /etc/sing-box-manager /var/lib/sing-box /var/log/sing-box \
+             /var/lock/singbox-manager.lock /var/lock/singbox-tg-agent.lock /var/lock/singbox-tg-agent.lock.d \
+             "$SB_SHORTCUT" "$SB_TARGET_SCRIPT" /root/sing-box.sh >/dev/null 2>&1 || true
+      echo ""
+      ok "已彻底卸载并清空所有文件，无需手动清理。"
+      print_wireproxy_cleanup_hint_if_present
+      exit 0
+      ;;
+    ""|0|q|Q) return 0 ;;
+    *) warn "无效选择。"; sleep 1 ;;
+  esac
+}
+
+install_and_uninstall_menu() {
+  while true; do
+    clear
+    print_rect_title "安装 / 更新 / 卸载"
+    singbox_status_summary
+    ui_hr
+    echo -e "  ${C}1.${NC} 安装或更新 sing-box"
+    echo -e "  ${R}2.${NC} 卸载 sing-box"
+    echo -e "  ${D}0. 返回主菜单${NC}"
+    ui_hr
+    local opt
+    read -r -p "请选择操作（回车返回）: " opt
+    case "${opt:-}" in
+      1) install_or_update_singbox || true ;;
+      2) uninstall_singbox_keep_config || true ;;
+      ""|0|q|Q) return 0 ;;
+      *) warn "无效输入：$opt"; sleep 1 ;;
+    esac
+  done
 }
 
 # >>>>>>>>> END MODULE: 80_installer.sh <<<<<<<<<<<
@@ -9522,7 +9822,7 @@ uninstall_singbox_keep_config() {
 # >>>>>>>>> BEGIN MODULE: 90_protocol_menu.sh <<<<<<<<<<<
 # ============================================================
 # 模块: 90_protocol_menu.sh
-# 职责: 协议管理菜单、安装/卸载协议、规范化接管
+# 职责: 协议管理菜单、安装/卸载协议、系统工具与状态概览
 # 依赖: 00_base.sh, 10_config.sh, 20_protocol.sh, 30_route.sh
 # ============================================================
 
@@ -9548,231 +9848,6 @@ protocol_status_summary() {
 protocol_entry_table() {
   local json="$1"
   protocol_entry_inventory "$json" | sort_tsv_by_protocol 1
-}
-
-# ---------- 规范化接管 ----------
-
-normalize_takeover(){
-  init_manager_env || { pause; return 0; }
-  clear
-  local json work_json
-  local -a inv_lines=() issue_lines=() action_lines=()
-  local -A target_seen=()
-  local tag_updates=0 direct_updates=0 relay_user_updates=0 relay_out_updates=0 skipped=0
-
-  json="$(config_load)"
-  work_json="$json"
-  mapfile -t inv_lines < <(protocol_entry_inventory_ext "$json")
-
-  echo -e "${C}--- 规范化接管 ---${NC}"
-
-  if [ ${#inv_lines[@]} -eq 0 ]; then
-    warn "未识别到可接管的核心协议对象。"
-    pause
-    return 0
-  fi
-
-  local line idx oldtag proto port target current_count
-  for line in "${inv_lines[@]}"; do
-    IFS=$'\x01' read -r idx oldtag proto port <<< "$line"
-    target="$(entry_key_from_parts "$proto" "$port")" || continue
-    target_seen["$target"]=$(( ${target_seen["$target"]:-0} + 1 ))
-  done
-
-  for line in "${inv_lines[@]}"; do
-    IFS=$'\x01' read -r idx oldtag proto port <<< "$line"
-    target="$(entry_key_from_parts "$proto" "$port")" || continue
-
-    if [ "${target_seen[$target]:-0}" -gt 1 ]; then
-      issue_lines+=("主入站目标名冲突：${proto}:${port} -> ${target}（已跳过）")
-      skipped=$((skipped+1))
-      continue
-    fi
-
-    current_count="$(echo "$work_json" | jq -r --arg t "$target" --argjson idx "$idx" '[.inbounds | to_entries[] | select((.value.tag // "") == $t and .key != $idx)] | length')"
-    if [ "$current_count" -gt 0 ]; then
-      issue_lines+=("主入站目标 tag 已被其它对象占用：${target}（已跳过）")
-      skipped=$((skipped+1))
-      continue
-    fi
-
-    if [ "$oldtag" != "$target" ]; then
-      work_json="$(echo "$work_json" | jq --argjson idx "$idx" --arg t "$target" '.inbounds[$idx].tag = $t')" || {
-        err "规范化主入站 tag 失败：$proto:$port"
-        pause
-        return 1
-      }
-      action_lines+=("主入站：${oldtag:-<空>} -> ${target}")
-      tag_updates=$((tag_updates+1))
-    fi
-
-    local -a user_lines=() relay_names=() direct_candidates=()
-    local user_line uidx uname relay_user out_tag land new_user new_out direct_old
-
-    mapfile -t user_lines < <(echo "$work_json" | jq -r --argjson idx "$idx" '.inbounds[$idx].users // [] | to_entries[] | [.key, (.value.name // .value.username // "")] | join("\u0001")')
-    mapfile -t relay_names < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $2}')
-
-    for user_line in "${user_lines[@]}"; do
-      IFS=$'\x01' read -r uidx uname <<< "$user_line"
-      local is_relay=0 rn
-      for rn in "${relay_names[@]}"; do
-        if [ "$uname" = "$rn" ] && [ -n "$uname" ]; then
-          is_relay=1
-          break
-        fi
-      done
-      if [ "$proto" != "socks" ] && [ $is_relay -eq 0 ] && [[ "$uname" != *"@"* ]]; then
-        direct_candidates+=("$uidx:$uname")
-      fi
-    done
-
-    if [ ${#direct_candidates[@]} -eq 1 ]; then
-      direct_old="${direct_candidates[0]#*:}"
-      uidx="${direct_candidates[0]%%:*}"
-      if [ "$direct_old" != "$target" ]; then
-        work_json="$(echo "$work_json" | jq --argjson idx "$idx" --argjson uidx "$uidx" --arg old "$direct_old" --arg new "$target" '
-          if (.inbounds[$idx].users[$uidx].name? // "") == $old then
-            .inbounds[$idx].users[$uidx].name = $new
-          elif (.inbounds[$idx].users[$uidx].username? // "") == $old then
-            .inbounds[$idx].users[$uidx].username = $new
-          else . end
-          | .route.rules |= map(
-              if (.auth_user? != null) then
-                .auth_user |= (
-                  if type == "array" then map(if . == $old then $new else . end)
-                  elif . == $old then $new
-                  else . end
-                )
-              else . end
-            )
-        ')" || {
-          err "规范化直连用户失败：$target"
-          pause
-          return 1
-        }
-        action_lines+=("直连用户：${direct_old:-<空>} -> ${target}")
-        direct_updates=$((direct_updates+1))
-      fi
-    elif [ ${#direct_candidates[@]} -gt 1 ]; then
-      issue_lines+=("主入站存在多个直连候选用户，未自动规范化：${target}")
-      skipped=$((skipped+1))
-    fi
-
-    while IFS=$'\x01' read -r _ relay_user out_tag; do
-      [ -z "${relay_user:-}" ] && continue
-      [[ "$relay_user" == *"@"* ]] && continue
-      land=""
-      if [[ "$out_tag" =~ ^out-.*-to-(.+)$ ]]; then
-        land="${BASH_REMATCH[1]}"
-      elif [[ "$out_tag" =~ ^out-to-(.+)$ ]]; then
-        land="${BASH_REMATCH[1]}"
-      elif [[ "$out_tag" =~ ^to-(.+)$ ]]; then
-        land="${BASH_REMATCH[1]}"
-      elif [[ "$relay_user" =~ -to-(.+)$ ]]; then
-        land="${BASH_REMATCH[1]}"
-      fi
-
-      if [ -z "$land" ] || [ -z "$out_tag" ]; then
-        issue_lines+=("中转关系不完整，未自动接管：${relay_user:-<空>} -> ${out_tag:-<空>}")
-        skipped=$((skipped+1))
-        continue
-      fi
-
-      new_user="$(relay_user_name "$target" "$land")"
-      new_out="$(relay_outbound_tag "$target" "$land")"
-
-      if [ "$relay_user" != "$new_user" ]; then
-        work_json="$(echo "$work_json" | jq --argjson idx "$idx" --arg old "$relay_user" --arg new "$new_user" '
-          (.inbounds[$idx].users // []) |= map(
-            if (.name // "") == $old then .name = $new
-            elif (.username // "") == $old then .username = $new
-            else . end
-          )
-          | .route.rules |= map(
-              if (.auth_user? != null) then
-                .auth_user |= (
-                  if type == "array" then map(if . == $old then $new else . end)
-                  elif . == $old then $new
-                  else . end
-                )
-              else . end
-            )
-        ')" || {
-          err "规范化中转用户失败：$relay_user"
-          pause
-          return 1
-        }
-        action_lines+=("中转用户：${relay_user} -> ${new_user}")
-        relay_user_updates=$((relay_user_updates+1))
-      fi
-
-      if [ "$out_tag" != "$new_out" ]; then
-        if echo "$work_json" | jq -e --arg o "$new_out" --arg old "$out_tag" '.outbounds[]? | select((.tag // "") == $new_out and (.tag // "") != $old)' >/dev/null 2>&1; then
-          issue_lines+=("目标 outbound tag 已存在，未自动规范化：${out_tag} -> ${new_out}")
-          skipped=$((skipped+1))
-        else
-          work_json="$(echo "$work_json" | jq --arg old "$out_tag" --arg new "$new_out" '
-            .outbounds |= map(if (.tag // "") == $old then .tag = $new else . end)
-            | .route.rules |= map(if (.outbound // "") == $old then .outbound = $new else . end)
-          ')" || {
-            err "规范化中转 outbound 失败：$out_tag"
-            pause
-            return 1
-          }
-          action_lines+=("中转 outbound：${out_tag} -> ${new_out}")
-          relay_out_updates=$((relay_out_updates+1))
-        fi
-      fi
-    done < <(relay_list_table "$work_json" | awk -F '\x01' -v ek="$target" '$1 == ek {print $1"\001"$2"\001"$3}')
-  done
-
-  echo -e "${B}--------------------------------------------------------${NC}"
-  echo -e "${C}预览结果${NC}"
-  echo -e "  主入站规范化：${tag_updates}"
-  echo -e "  直连用户规范化：${direct_updates}"
-  echo -e "  中转用户规范化：${relay_user_updates}"
-  echo -e "  中转 outbound 规范化：${relay_out_updates}"
-  if [ ${#action_lines[@]} -gt 0 ]; then
-    echo -e "${B}--------------------------------------------------------${NC}"
-    echo -e "${C}计划执行${NC}"
-    local a
-    for a in "${action_lines[@]}"; do
-      echo -e "  - ${a}"
-    done
-  fi
-  if [ ${#issue_lines[@]} -gt 0 ]; then
-    echo -e "${B}--------------------------------------------------------${NC}"
-    echo -e "${Y}发现但未自动处理${NC}"
-    local it
-    for it in "${issue_lines[@]}"; do
-      echo -e "  - ${it}"
-    done
-  fi
-
-  if [ $tag_updates -eq 0 ] && [ $direct_updates -eq 0 ] && [ $relay_user_updates -eq 0 ] && [ $relay_out_updates -eq 0 ]; then
-    warn "没有可自动规范化的对象。"
-    pause
-    return 0
-  fi
-
-  echo ""
-  ask_confirm_yes "输入 YES 确认执行规范化接管，其它任意输入取消: " || { warn "已取消规范化接管。"; pause; return 0; }
-
-  work_json="$(route_rebuild "$work_json")" || {
-    err "规范化接管后重建路由失败，已取消写入。"
-    pause
-    return 1
-  }
-
-  if config_apply "$work_json"; then
-    ok "规范化接管完成。"
-  else
-    err "规范化接管应用失败。"
-    pause
-    return 1
-  fi
-
-  pause
 }
 
 # ---------- 协议安装菜单 ----------
@@ -9859,22 +9934,26 @@ protocol_install_menu() {
   local -a hy2_meta_tags=()
   local -a hy2_meta_ranges=()
   local -a hy2_old_ranges=()
-  local i=1 proto
-  echo -e "\n${C}可安装协议（多个用 + 连接，如 1+3+5）:${NC}"
+  local i=1 proto desc
+  echo -e "\n${W}可安装的协议${NC} ${D}（支持多选，用 + 连接，如 1+3）${NC}"
+  ui_hr
   for proto in "${SUPPORTED_PROTOCOLS[@]}"; do
-    echo -e "  [$i] $proto"
+    desc="${PROTO_DESC[$proto]:-}"
+    printf '  %b%d.%b %-15s %b%s%b\n' "$C" "$i" "$NC" "$proto" "$D" "$desc" "$NC"
     i=$((i+1))
   done
-  read -r -p "请输入要安装的协议编号（回车返回）: " sel
+  ui_hr
+  read -r -p "请输入协议编号（回车返回）: " sel
+  [ -z "${sel:-}" ] && return 0
   mapfile -t choice_arr < <(parse_plus_selections "${sel:-}")
-  [ ${#choice_arr[@]} -eq 0 ] && { warn "未选择任何协议，已返回上一级。"; pause; return 0; }
+  [ ${#choice_arr[@]} -eq 0 ] && return 0
 
   local c port listen sni path priv sid entry_key inbound pub generated_pair uuid pass method server_pass user_pass username
   local obfs_type obfs_pass obfs_choice hop_answer hop_range hop_enabled hop_start hop_end
   for c in "${choice_arr[@]}"; do
     if ! [[ "$c" =~ ^[0-9]+$ ]] || [ "$c" -lt 1 ] || [ "$c" -gt "${#SUPPORTED_PROTOCOLS[@]}" ]; then
-      warn "无效协议编号：$c，已返回上一级。"
-      pause
+      warn "编号无效：$c"
+      sleep 1
       return 0
     fi
   done
@@ -10200,6 +10279,12 @@ protocol_install_menu() {
     if [ ${#hy2_meta_tags[@]} -gt 0 ]; then
       hy2_hop_restore_sync || warn "开机自恢复服务同步失败：重启后跳跃规则可能丢失，请手动检查。"
     fi
+    echo ""
+    if ask_confirm_default_yes "是否立即导出节点配置？[Y/n]: "; then
+      export_configs || true
+      return 0
+    fi
+    return 0
   fi
   pause
   return 0
@@ -10434,32 +10519,32 @@ singbox_status_summary() {
     systemd)
       _state="$(systemctl is-active sing-box 2>/dev/null || true)"
       case "$_state" in
-        active) _status="${G}运行中${NC}" ;;
-        failed) _status="${Y}异常${NC}" ;;
-        activating) _status="${Y}启动中${NC}" ;;
-        *) _status="${R}已停止${NC}" ;;
+        active) _status="${G}● 运行中${NC}" ;;
+        failed) _status="${Y}● 异常${NC}" ;;
+        activating) _status="${Y}● 启动中${NC}" ;;
+        *) _status="${R}○ 已停止${NC}" ;;
       esac
       ;;
     openrc)
       _state="$(rc-service sing-box status 2>&1 || true)"
       case "$_state" in
-        *crashed*) _status="${Y}异常${NC}" ;;
-        *started*|*running*) _status="${G}运行中${NC}" ;;
-        *stopped*) _status="${R}已停止${NC}" ;;
+        *crashed*) _status="${Y}● 异常${NC}" ;;
+        *started*|*running*) _status="${G}● 运行中${NC}" ;;
+        *stopped*) _status="${R}○ 已停止${NC}" ;;
         *)
           if singbox_service_active; then
-            _status="${G}运行中${NC}"
+            _status="${G}● 运行中${NC}"
           else
-            _status="${R}已停止${NC}"
+            _status="${R}○ 已停止${NC}"
           fi
           ;;
       esac
       ;;
     *)
       if singbox_service_active; then
-        _status="${G}运行中${NC}"
+        _status="${G}● 运行中${NC}"
       else
-        _status="${R}已停止${NC}"
+        _status="${R}○ 已停止${NC}"
       fi
       ;;
   esac
@@ -10467,51 +10552,99 @@ singbox_status_summary() {
   if [ -x "$SINGBOX_BIN" ]; then
     _version="$("$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version / {print $3; exit}')"
   fi
-  [ -n "$_version" ] || _version="未知"
+  [ -n "$_version" ] || _version="未安装"
 
   _suffix=""
   _upstream="$(get_cached_upstream_version 2>/dev/null || true)"
-  if [ "$_version" != "未知" ] && [ -n "$_upstream" ]; then
+  if [ "$_version" != "未安装" ] && [ -n "$_upstream" ]; then
     if [ "$_version" != "$_upstream" ] && version_ge "$_upstream" "$_version"; then
-      _suffix="  ${Y}(有新版 ${_upstream})${NC}"
+      _suffix="  ${Y}↑ 有新版 v${_upstream}${NC}"
     fi
-  elif [ "$_version" != "未知" ] && [ -z "$_upstream" ]; then
-    _suffix="  ${Y}(新版检测: 未知)${NC}"
   fi
 
-  printf '  %bsing-box%b : %b  版本 %b%s%b%b\n' "$W" "$NC" "$_status" "$G" "$_version" "$NC" "$_suffix"
+  if [ "$_version" = "未安装" ]; then
+    printf '  %b运行状态：%b%b  %b(未安装内核)%b\n' "$D" "$NC" "$_status" "$Y" "$NC"
+  else
+    printf '  %b运行状态：%b%b  %bv%s%b%b\n' "$D" "$NC" "$_status" "$C" "$_version" "$NC" "$_suffix"
+  fi
+}
+
+# 主界面轻量概览：零网络请求，纯本地快速统计节点/中转/用户/扩展状态
+singbox_dashboard_summary() {
+  singbox_status_summary
+  local node_cnt=0 relay_cnt=0 user_cnt=0 disabled_cnt=0
+  if [ -s "$CONFIG_FILE" ] && has_cmd jq; then
+    read -r node_cnt relay_cnt < <(
+      jq -r '
+        [
+          ((.inbounds // []) | length),
+          ([.outbounds[]? | select((.tag // "") | startswith("to-"))] | length)
+        ] | @tsv
+      ' "$CONFIG_FILE" 2>/dev/null || printf '0\t0\n'
+    )
+  fi
+  if [ -s "$USER_DB_FILE" ] && has_cmd jq; then
+    read -r user_cnt disabled_cnt < <(
+      jq -r '
+        [
+          ((.users // {}) | length),
+          ([(.users // {})[] | select(.enabled != true)] | length)
+        ] | @tsv
+      ' "$USER_DB_FILE" 2>/dev/null || printf '0\t0\n'
+    )
+  fi
+  local user_txt="${user_cnt} 位用户"
+  [ "${disabled_cnt:-0}" -gt 0 ] && user_txt="${user_cnt} 位用户 (${disabled_cnt} 停用)"
+  printf '  %b节点概览：%b%b%s%b 个节点 · %b%s%b 条中转 · %b%s%b\n' \
+    "$D" "$NC" "$W" "${node_cnt:-0}" "$NC" "$W" "${relay_cnt:-0}" "$NC" "$W" "$user_txt" "$NC"
+
+  local warp_txt="${D}未开启${NC}" tg_txt="${D}未启用${NC}"
+  if [ -s "$META_FILE" ] && has_cmd jq; then
+    local w_cnt
+    w_cnt="$(jq -r 'if (.warp.mode // "off") == "rules" then ((.warp.rules // []) | length) else 0 end' "$META_FILE" 2>/dev/null || echo 0)"
+    [ "${w_cnt:-0}" -gt 0 ] && warp_txt="${G}已开启(${w_cnt}条)${NC}"
+  fi
+  if [ -s "$TG_CONFIG_FILE" ] && has_cmd jq; then
+    local tg_en tg_role
+    read -r tg_en tg_role < <(jq -r '[(.enabled // false | tostring), (.role // "")] | @tsv' "$TG_CONFIG_FILE" 2>/dev/null || printf 'false\t\n')
+    if [ "$tg_en" = "true" ]; then
+      case "$tg_role" in
+        center) tg_txt="${G}中心端${NC}" ;;
+        agent)  tg_txt="${G}节点端${NC}" ;;
+        *)      tg_txt="${G}已启用${NC}" ;;
+      esac
+    fi
+  fi
+  printf '  %b扩展功能：%bWARP 分流 %b  ·  Telegram %b\n' "$D" "$NC" "$warp_txt" "$tg_txt"
+}
+
+singbox_restart() {
+  clear
+  print_rect_title "重启 sing-box"
+  if run_with_spinner "正在重启 sing-box 并检查状态..." reload_or_restart_singbox_safe; then
+    ok "sing-box 已重启并运行正常。"
+  else
+    err "重启失败，请查看实时日志排查原因。"
+  fi
+  echo ""
+  pause
 }
 
 singbox_start() {
   clear
   print_rect_title "启动 sing-box"
+  local rc=0
   case "$INIT_SYSTEM" in
-    systemd)
-      if systemctl start sing-box; then
-        sleep 1
-        if systemctl is-active --quiet sing-box 2>/dev/null; then
-          ok "sing-box 已启动并正常运行。"
-        else
-          err "启动命令已执行，但服务未能正常运行，请检查配置或日志。"
-        fi
-      else
-        err "启动失败，请检查配置或日志。"
-      fi
-      ;;
-    openrc)
-      if openrc_start_service sing-box >/dev/null 2>&1; then
-        sleep 1
-        if openrc_service_running sing-box; then
-          ok "sing-box 已启动并正常运行。"
-        else
-          err "启动命令已执行，但服务未能正常运行，请检查配置或日志。"
-        fi
-      else
-        err "启动失败，请检查配置或日志。"
-      fi
-      ;;
-    *) err "未识别的 init 系统，无法启动 sing-box。" ;;
+    systemd) run_with_spinner "正在启动 sing-box..." systemctl start sing-box || rc=1 ;;
+    openrc)  run_with_spinner "正在启动 sing-box..." openrc_start_service sing-box || rc=1 ;;
+    *) err "未识别的系统服务管理器，无法启动。"; pause; return 1 ;;
   esac
+  sleep 1
+  if [ "$rc" -eq 0 ] && singbox_service_active; then
+    ok "sing-box 已启动并运行正常。"
+  else
+    err "启动失败，请检查配置或查看日志。"
+  fi
   echo ""
   pause
 }
@@ -10520,13 +10653,9 @@ singbox_stop() {
   clear
   print_rect_title "停止 sing-box"
   case "$INIT_SYSTEM" in
-    systemd)
-      systemctl stop sing-box && ok "sing-box 已停止。" || err "停止失败。"
-      ;;
-    openrc)
-      openrc_stop_service sing-box >/dev/null 2>&1 && ok "sing-box 已停止。" || err "停止失败。"
-      ;;
-    *) err "未识别的 init 系统，无法停止 sing-box。" ;;
+    systemd) run_with_spinner "正在停止 sing-box..." systemctl stop sing-box && ok "sing-box 已停止。" || err "停止失败。" ;;
+    openrc)  run_with_spinner "正在停止 sing-box..." openrc_stop_service sing-box && ok "sing-box 已停止。" || err "停止失败。" ;;
+    *) err "未识别的系统服务管理器，无法停止。" ;;
   esac
   echo ""
   pause
@@ -10539,24 +10668,36 @@ system_tools_menu() {
     singbox_status_summary
     cron_job_status_line "实时同步" "$PERIODIC_SYNC_CRON_MARK"
     cron_job_status_line "日常维护" "$DAILY_MAINTENANCE_CRON_MARK"
-    echo -e "${B}----------------------------------------${NC}"
-    echo -e "  ${C}1.${NC} 启动 sing-box"
-    echo -e "  ${C}2.${NC} 停止 sing-box"
-    echo -e "  ${C}3.${NC} 查看 sing-box 实时日志"
-    echo -e "  ${C}4.${NC} 查看 config 配置文件"
-    echo -e "  ${C}5.${NC} 清空/重置 config 配置文件"
-    echo -e "  ${C}6.${NC} 一键校准系统时间"
-    echo -e "  ${C}7.${NC} 规范化接管旧配置"
-    echo -e "  ${R}0.${NC} 返回主菜单"
-    read -r -p "请选择操作: " act
+    ui_hr
+    local toggle_label
+    if singbox_service_active; then
+      toggle_label="停止 sing-box 服务"
+    else
+      toggle_label="启动 sing-box 服务"
+    fi
+    echo -e "  ${C}1.${NC} 重启 sing-box 服务"
+    echo -e "  ${C}2.${NC} ${toggle_label}"
+    echo -e "  ${C}3.${NC} 查看实时运行日志"
+    echo -e "  ${C}4.${NC} 查看当前配置文件"
+    echo -e "  ${C}5.${NC} 一键校准系统时间"
+    echo -e "  ${Y}6.${NC} 重置全部节点配置 ${D}(清空 config.json)${NC}"
+    echo -e "  ${D}0. 返回主菜单${NC}"
+    ui_hr
+    local act
+    read -r -p "请选择操作（回车返回）: " act
     case "${act:-}" in
-      1) singbox_start ;;
-      2) singbox_stop ;;
+      1) singbox_restart ;;
+      2)
+        if singbox_service_active; then
+          singbox_stop
+        else
+          singbox_start
+        fi
+        ;;
       3) view_realtime_log ;;
       4) view_config_formatted ;;
-      5) clear_config_json ;;
-      6) sync_system_time_chrony ;;
-      7) normalize_takeover ;;
+      5) sync_system_time_chrony ;;
+      6) clear_config_json ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
@@ -10576,30 +10717,37 @@ main_menu() {
   ensure_local_script_entrypoint_once
   while true; do
     clear
-    print_rect_title "Sing-box Elite 管理系统  V${SCRIPT_VERSION}"
-    singbox_status_summary
-    echo -e "${B}--------------------------------------------------------${NC}"
-    echo -e "  ${C}1.${NC} 安装/更新 sing-box"
-    echo -e "  ${C}2.${NC} 系统工具"
-    echo -e "  ${C}3.${NC} 协议管理"
-    echo -e "  ${C}4.${NC} 中转管理"
-    echo -e "  ${C}5.${NC} warp分流"
-    echo -e "  ${C}6.${NC} 导出节点配置"
-    echo -e "  ${C}7.${NC} 用户管理"
-    echo -e "  ${C}8.${NC} 卸载 sing-box"
-    echo -e "  ${R}0.${NC} 退出系统"
-    echo -e "${B}--------------------------------------------------------${NC}"
-    read -r -p "请选择操作指令: " opt
+    print_rect_title "Sing-box 管理面板  v${SCRIPT_VERSION}"
+    singbox_dashboard_summary
+    ui_hr
+    ui_section "核心功能"
+    echo -e "    ${C}1.${NC} 节点管理       ${D}安装 / 查看 / 删除协议节点${NC}"
+    echo -e "    ${C}2.${NC} 中转管理       ${D}全流量转发 / 按网站分流中转${NC}"
+    echo -e "    ${C}3.${NC} 用户与流量     ${D}多用户管理 / 套餐限额 / 流量统计${NC}"
+    echo -e "    ${C}4.${NC} 导出配置       ${D}Clash / QX / Surge / 通用链接${NC}"
+
+    ui_section "扩展功能（可选）"
+    echo -e "    ${C}5.${NC} WARP 分流      ${D}通过本地 WireProxy 分流指定网站${NC}"
+    echo -e "    ${C}6.${NC} Telegram Bot   ${D}查流量 / 到期提醒 / 远程管理${NC}"
+
+    ui_section "系统维护"
+    echo -e "    ${C}7.${NC} 安装与卸载     ${D}安装内核 / 检查更新 / 一键卸载${NC}"
+    echo -e "    ${C}8.${NC} 系统工具       ${D}重启服务 / 实时日志 / 时间校准${NC}"
+    echo ""
+    echo -e "    ${D}0. 退出${NC}"
+    ui_hr
+    read -r -p "请选择操作: " opt
     case "${opt:-}" in
-      1) install_or_update_singbox ;;
-      2) system_tools_menu || true ;;
-      3) protocol_manager || true ;;
-      4) manage_relay_nodes || true ;;
+      1) protocol_manager || true ;;
+      2) manage_relay_nodes || true ;;
+      3) user_manager_menu || true ;;
+      4) export_configs || true ;;
       5) warp_manager_menu || true ;;
-      6) export_configs || true ;;
-      7) user_manager_menu || true ;;
-      8) uninstall_singbox_keep_config ;;
+      6) telegram_bot_manager_menu || true ;;
+      7) install_and_uninstall_menu || true ;;
+      8) system_tools_menu || true ;;
       0|q|Q) exit 0 ;;
+      "") continue ;;
       *) warn "无效输入：$opt"; sleep 1 ;;
     esac
   done

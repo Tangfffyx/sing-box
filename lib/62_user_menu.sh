@@ -16,38 +16,50 @@ show_user_status_table() {
   local -a rows=()
   local -a cols=()
 
-  header="用户名${sep}状态${sep}上传流量${sep}下载流量${sep}补正流量${sep}已用总量${sep}套餐${sep}重置日${sep}到期时间"
+  header="用户名${sep}状态${sep}已用 / 套餐${sep}进度${sep}重置日${sep}到期"
   rows+=("$header")
 
   while IFS= read -r row_line; do
     [ -n "$row_line" ] && rows+=("$row_line")
   done < <(
-    echo "$db_json" | jq -r '
+    printf '%s\n' "$db_json" | jq -r '
       .users
       | to_entries
       | .[]
+      | (.value.enabled == true) as $en
+      | (.value.disabled_reason // "") as $reason
+      | (if $en then "正常"
+         elif $reason == "quota" then "超流量"
+         elif $reason == "expired" then "已过期"
+         else "已停用" end) as $st
+      | ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $used
+      | (.value.quota_gb // 0) as $qgb
       | [
           .key,
-          (if (.value.enabled == true) then "开启" else "关闭" end),
-          ((.value.used_up_bytes // 0) | tostring),
-          ((.value.used_down_bytes // 0) | tostring),
-          ((.value.manual_added_bytes // 0) | tostring),
-          (((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) | tostring),
-          ((if (.value.quota_gb // 0) == 0 then "不限" else ((.value.quota_gb|tostring) + "GB") end)),
+          $st,
+          ($used | tostring),
+          ($qgb | tostring),
           (if (.value.reset_day // 0) == 0 then "不重置" elif (.value.reset_day // 0) == 32 then "月底" else ((.value.reset_day|tostring) + "号") end),
           (if (.value.expire_at // "0") == "0" then "永久" else (.value.expire_at // "0") end)
         ] | join("\u0001")
-    ' | while IFS=$'\x01' read -r c1 c2 c3 c4 c5 c6 c7 c8 c9; do
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$c1" \
-            "$c2" \
-            "$(format_bytes_human "$c3")" \
-            "$(format_bytes_human "$c4")" \
-            "$(format_bytes_human "$c5")" \
-            "$(format_bytes_human "$c6")" \
-            "$c7" \
-            "$c8" \
-            "$c9"
+    ' | while IFS=$'\x01' read -r c_name c_status c_used c_qgb c_reset c_expire; do
+          local used_txt usage_col bar_col pct
+          used_txt="$(format_bytes_human "$c_used")"
+          if [ "${c_qgb:-0}" -gt 0 ] 2>/dev/null; then
+            usage_col="${used_txt} / ${c_qgb}GB"
+            pct="$(awk -v u="$c_used" -v q="$c_qgb" 'BEGIN {
+              p = (u * 100.0) / (q * 1073741824.0);
+              if (p < 0) p = 0;
+              if (p > 100) p = 100;
+              printf "%d", p + 0.5;
+            }')"
+            bar_col="$(ui_mini_bar "$pct" 8) ${pct}%"
+          else
+            usage_col="${used_txt} / 不限"
+            bar_col="—"
+          fi
+          printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$c_name" "$c_status" "$usage_col" "$bar_col" "$c_reset" "$c_expire"
       done
   )
 
@@ -57,17 +69,40 @@ show_user_status_table() {
   local header_line divider_line divider_width
   header_line="$(table_print_row "$widths_line" "${cols[@]}")"
   divider_width="$(text_display_width "$header_line")"
-  divider_line="$(printf '%*s' "$divider_width" '' | tr ' ' '-')"
+  divider_line=""
+  local i
+  for ((i=0; i<divider_width; i++)); do divider_line+="─"; done
 
-  ui_echo "\033[1m${header_line}${NC}"
-  ui_echo "${B}${divider_line}${NC}"
+  ui_echo "${W}${header_line}${NC}"
+  ui_echo "${D}${divider_line}${NC}"
 
   for row_line in "${rows[@]:1}"; do
     IFS="$sep" read -r -a cols <<< "$row_line"
     table_print_row "$widths_line" "${cols[@]}"
   done
 
-  ui_echo "${B}${divider_line}${NC}"
+  ui_echo "${D}${divider_line}${NC}"
+}
+
+show_user_detail_card() {
+  local db_json="$1" username="$2"
+  local up down manual total
+  IFS=$'\x01' read -r up down manual total < <(
+    printf '%s\n' "$db_json" | jq -r --arg u "$username" '
+      .users[$u] as $v
+      | [
+          (($v.used_up_bytes // 0) | tostring),
+          (($v.used_down_bytes // 0) | tostring),
+          (($v.manual_added_bytes // 0) | tostring),
+          ((($v.used_up_bytes // 0) + ($v.used_down_bytes // 0) + ($v.manual_added_bytes // 0)) | tostring)
+        ] | join("\u0001")
+    '
+  )
+  printf '  %b流量明细：%b上传 %b%s%b · 下载 %b%s%b · 补正 %b%s%b · 合计 %b%s%b\n' \
+    "$D" "$NC" "$C" "$(format_bytes_human "$up")" "$NC" \
+    "$C" "$(format_bytes_human "$down")" "$NC" \
+    "$C" "$(format_bytes_human "$manual")" "$NC" \
+    "$W" "$(format_bytes_human "$total")" "$NC"
 }
 
 prompt_reset_day() {
@@ -218,7 +253,10 @@ user_add_menu() {
     }
   ')"
   user_manager_commit_edit "$before_db" "$db_json" || { pause; return 1; }
-  pause
+  echo ""
+  if ask_confirm_default_yes "是否立即导出用户 ${username} 的节点配置？[Y/n]: "; then
+    export_configs "$username" || true
+  fi
 }
 
 user_manage_permission_menu() {
@@ -387,10 +425,7 @@ user_reset_usage_menu() {
   ui_echo "将清零该用户的上传流量、下载流量和手动补正流量。"
   ui_echo "此操作不会修改用户的启用状态、套餐设置、到期时间或重置日。"
   local ans
-  read -r -p "输入 YES 确认重置该用户流量，其它任意输入取消: " ans
-  if [ "$ans" != "YES" ]; then
-    return 1
-  fi
+  ask_confirm_yes "输入 yes 确认清零该用户流量（回车取消）: " || return 1
   echo "$db_json" | jq --arg u "$username" '
     .users[$u].used_up_bytes = 0
     | .users[$u].used_down_bytes = 0
@@ -516,25 +551,34 @@ user_manage_single() {
     db_json="$(user_db_load)"
     json="$(config_load)"
     clear
-    print_rect_title "管理用户"
+    print_rect_title "管理用户 · ${username}"
     show_user_status_table "$db_json"
-    echo "当前用户：$username"
-    [ $is_admin -eq 1 ] && echo "admin 为系统默认用户，不可删除，默认拥有全部节点权限。"
+    show_user_detail_card "$db_json" "$username"
+    [ $is_admin -eq 1 ] && echo -e "  ${D}admin 为系统默认管理员，不可删除，拥有全部节点权限。${NC}"
     show_user_allowed_nodes "$db_json" "$username"
-    echo "  1. 启用/停用"
-    [ $is_admin -eq 0 ] && echo "  2. 节点权限"
-    echo "  3. 套餐设置"
-    echo "  4. 手动重置流量"
-    echo "  5. 手动添加流量（对齐总量）"
-    echo "  6. 一键续期"
-    echo "  0. 返回上一级"
-    read -r -p "请选择操作: " act
+    ui_hr
+    local toggle_txt
+    if user_db_user_is_enabled "$db_json" "$username"; then
+      toggle_txt="停用该用户"
+    else
+      toggle_txt="启用该用户"
+    fi
+    echo -e "  ${C}1.${NC} ${toggle_txt}"
+    [ $is_admin -eq 0 ] && echo -e "  ${C}2.${NC} 节点权限"
+    echo -e "  ${C}3.${NC} 套餐与到期设置"
+    echo -e "  ${C}4.${NC} 清零已用流量"
+    echo -e "  ${C}5.${NC} 补正 / 调整流量"
+    echo -e "  ${C}6.${NC} 一键续期"
+    echo -e "  ${C}7.${NC} 导出该用户配置"
+    echo -e "  ${D}0. 返回上一级${NC}"
+    ui_hr
+    read -r -p "请选择操作（回车返回）: " act
     case "${act:-}" in
       1)
         if user_db_user_is_enabled "$db_json" "$username"; then
-          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false | .users[$u].disabled_reason = "manual"')"
+          new_db="$(printf '%s\n' "$db_json" | jq --arg u "$username" '.users[$u].enabled = false | .users[$u].disabled_reason = "manual"')"
         else
-          new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')"
+          new_db="$(printf '%s\n' "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')"
         fi
         user_manager_commit_edit "$db_json" "$new_db" edit "$username" || true
         ;;
@@ -568,11 +612,14 @@ user_manage_single() {
         ;;
       6)
         mode=edit
-        if user_expire_is_past "$(user_today_date)" "$(echo "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"; then mode=reset; fi
+        if user_expire_is_past "$(user_today_date)" "$(printf '%s\n' "$db_json" | jq -r --arg u "$username" '.users[$u].expire_at // "0"')"; then mode=reset; fi
         new_db="$(user_renew_menu "$db_json" "$username")" || new_db=""
         if json_is_object "$new_db"; then
           user_manager_commit_edit "$db_json" "$new_db" "$mode" "$username" || true
         fi
+        ;;
+      7)
+        export_configs "$username" || true
         ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
@@ -640,7 +687,7 @@ user_delete_menu() {
   for username in "${names_to_delete[@]}"; do
     echo "  - $username"
   done
-  ask_confirm_yes "输入 YES 确认彻底删除，其它任意输入取消: " || { warn "已取消删除。"; pause; return 0; }
+  ask_confirm_yes "输入 yes 确认彻底删除（回车取消）: " || return 0
 
   new_db="$db_json"
   for username in "${names_to_delete[@]}"; do
@@ -662,22 +709,22 @@ user_manager_menu() {
     }
   fi
   while true; do
+    sync_user_usage_counters >/dev/null 2>&1 || true
     local db_json
     db_json="$(user_db_load)"
     clear
-    print_rect_title "用户管理"
+    print_rect_title "用户与流量管理"
     show_user_status_table "$db_json"
     echo -e "  ${C}1.${NC} 新增用户"
-    echo -e "  ${C}2.${NC} 管理用户"
-    echo -e "  ${C}3.${NC} 删除用户"
-    echo -e "  ${C}4.${NC} Telegram Bot 管理"
-    echo -e "  ${R}0.${NC} 返回主菜单"
-    read -r -p "请选择操作: " act
+    echo -e "  ${C}2.${NC} 管理用户 ${D}(启停 / 套餐 / 续期 / 权限 / 导链接)${NC}"
+    echo -e "  ${R}3.${NC} 删除用户"
+    echo -e "  ${D}0. 返回主菜单${NC}"
+    ui_hr
+    read -r -p "请选择操作（回车返回）: " act
     case "${act:-}" in
       1) user_add_menu || true ;;
       2) user_select_and_manage_menu || true ;;
       3) user_delete_menu || true ;;
-      4) telegram_bot_manager_menu || true ;;
       0|q|Q|"") return 0 ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac

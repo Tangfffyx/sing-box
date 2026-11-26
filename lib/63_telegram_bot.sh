@@ -1088,25 +1088,26 @@ telegram_bot_manager_menu() {
     if [ "$enabled" != "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
       role_label="${role_label}（已停止）"
     fi
-    echo "当前模式：$role_label"
-    [ -n "$vps_name" ] && echo "本机名称：$vps_name"
-    [ -n "$center_url" ] && echo "主控地址：$center_url"
+    echo -e "  ${D}当前模式：${NC}${W}${role_label}${NC}"
+    [ -n "$vps_name" ] && echo -e "  ${D}本机名称：${NC}${vps_name}"
+    [ -n "$center_url" ] && echo -e "  ${D}主控地址：${NC}${center_url}"
     if [ "$role" = "center" ] && [ -n "$access_secret" ]; then
-      echo "接入密钥：$access_secret"
+      echo -e "  ${D}接入密钥：${NC}${C}${access_secret}${NC}"
     fi
-    echo -e "${B}--------------------------------------------------------${NC}"
-    echo "  1. 设置/启动TG Bot"
-    echo "  2. 生成用户绑定链接"
-    echo "  3. 通知测试"
+    ui_hr
+    echo -e "  ${C}1.${NC} 设置 / 启动 TG Bot"
+    echo -e "  ${C}2.${NC} 生成用户绑定链接"
+    echo -e "  ${C}3.${NC} 发送通知测试"
     if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
-      echo "  4. 重启/刷新TG Bot"
-      echo "  5. 卸载/停止TG Bot"
+      echo -e "  ${C}4.${NC} 重启 / 刷新 TG Bot"
+      echo -e "  ${R}5.${NC} 停止 / 卸载 TG Bot"
     else
-      echo "  4. 卸载/停止TG Bot"
+      echo -e "  ${R}4.${NC} 停止 / 卸载 TG Bot"
     fi
-    echo "  0. 返回上一级"
+    echo -e "  ${D}0. 返回主菜单${NC}"
+    ui_hr
     local act
-    read -r -p "请选择操作: " act
+    read -r -p "请选择操作（回车返回）: " act
     case "${act:-}" in
       1) tg_setup_menu ;;
       2) tg_generate_bind_link_menu ;;

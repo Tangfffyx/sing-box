@@ -230,6 +230,21 @@ test_corrupt_json_backup() {
   assert_json "$(cat "$META_FILE")" '.ok == true'
 }
 
+test_ui_helpers_and_split_rules() {
+  local out
+  out="$(run_with_spinner "test task" echo "hello-spinner" 2>&1)"
+  [ "$out" = "hello-spinner" ]
+  if run_with_spinner "fail task" false >/dev/null 2>&1; then return 1; fi
+  [ "$(ui_mini_bar 0 8)" = "░░░░░░░░" ]
+  [ "$(ui_mini_bar 50 8)" = "████░░░░" ]
+  [ "$(ui_mini_bar 120 8)" = "████████" ]
+  source "$ROOT/lib/35_split_rule_conflict.sh"
+  [ "$(split_rule_normalize_file "openai")" = "geosite-openai.srs" ]
+  [ "$(split_rule_normalize_file "geosite-google.srs")" = "geosite-google.srs" ]
+  if split_rule_normalize_file "https://example.com/a.srs" >/dev/null 2>&1; then return 1; fi
+  if split_rule_normalize_file "bad;name" >/dev/null 2>&1; then return 1; fi
+}
+
 run test_routes
 run test_accounting
 run test_user_edits
@@ -240,3 +255,4 @@ run test_install_transaction
 run test_linux_lock_and_process
 run test_openrc_restart
 run test_corrupt_json_backup
+run test_ui_helpers_and_split_rules

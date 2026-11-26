@@ -40,13 +40,14 @@ run_with_timeout() {
 }
 
 download_file() {
-  local url="$1" output="$2" connect_timeout="${3:-20}" retry_count="${4:-3}"
+  local url="$1" output="$2" connect_timeout="${3:-20}" retry_count="${4:-3}" label="${5:-正在下载}"
   if [ ! -t 1 ] || [ ! -t 2 ]; then
     curl -fsSL --connect-timeout "$connect_timeout" --retry "$retry_count" "$url" -o "$output" >/dev/null 2>&1
     return $?
   fi
 
-  local total tmp_err curl_pid rc size tick=0
+  local total tmp_err curl_pid rc size prev_size=0 speed=0 tick=0
+  printf '\r%b⠋%b %s（连接中...）\033[K' "$C" "$NC" "$label" >&2
   total="$(download_file_total_bytes "$url" "$connect_timeout")"
   tmp_err="$(mktemp /tmp/sb-download-err.XXXXXX)" || return 1
   rm -f "$output" >/dev/null 2>&1 || true
@@ -55,7 +56,13 @@ download_file() {
   curl_pid=$!
   while kill -0 "$curl_pid" 2>/dev/null; do
     size="$(file_size_bytes "$output")"
-    print_download_progress "$size" "$total" "$tick"
+    if [ "$size" -ge "$prev_size" ]; then
+      speed=$((size - prev_size))
+    else
+      speed=0
+    fi
+    prev_size="$size"
+    print_download_progress "$size" "$total" "$tick" "$speed" "$label"
     tick=$((tick + 1))
     sleep 1
   done
@@ -67,8 +74,14 @@ download_file() {
   fi
 
   clear_download_progress
-  if [ "$rc" -ne 0 ] && [ -s "$tmp_err" ]; then
-    sed 's/^/  /' "$tmp_err" >&2
+  if [ "$rc" -eq 0 ]; then
+    size="$(file_size_bytes "$output")"
+    printf '%b✓%b %s完成 %b(%s)%b\n' "$G" "$NC" "$label" "$D" "$(format_download_bytes "$size")" "$NC" >&2
+  else
+    printf '%b✗%b %s失败\n' "$R" "$NC" "$label" >&2
+    if [ -s "$tmp_err" ]; then
+      sed 's/^/  /' "$tmp_err" >&2
+    fi
   fi
   rm -f "$tmp_err" >/dev/null 2>&1 || true
   return "$rc"
@@ -77,7 +90,7 @@ download_file() {
 download_file_total_bytes() {
   local url="$1" connect_timeout="${2:-20}" total
   [ "$connect_timeout" -gt 5 ] && connect_timeout=5
-  total="$(curl -fsSIL --connect-timeout "$connect_timeout" --max-time 10 "$url" 2>/dev/null \
+  total="$(curl -fsSIL --connect-timeout "$connect_timeout" --max-time 8 "$url" 2>/dev/null \
     | awk 'tolower($1) == "content-length:" {gsub(/\r/,"",$2); n=$2} END {if (n ~ /^[0-9]+$/) print n}')" || true
   echo "${total:-0}"
 }
@@ -94,40 +107,38 @@ file_size_bytes() {
 format_download_bytes() {
   local bytes="${1:-0}"
   awk -v b="$bytes" 'BEGIN {
-    if (b >= 1073741824) printf "%.1fG", b / 1073741824;
-    else if (b >= 1048576) printf "%.1fM", b / 1048576;
-    else if (b >= 1024) printf "%.1fK", b / 1024;
-    else printf "%dB", b;
+    if (b >= 1073741824) printf "%.1f GB", b / 1073741824;
+    else if (b >= 1048576) printf "%.1f MB", b / 1048576;
+    else if (b >= 1024) printf "%.1f KB", b / 1024;
+    else printf "%d B", b;
   }'
 }
 
 print_download_progress() {
-  local size="${1:-0}" total="${2:-0}" tick="${3:-0}" width=24
-  local percent filled bar spin
+  local size="${1:-0}" total="${2:-0}" tick="${3:-0}" speed="${4:-0}" label="${5:-正在下载}" width=22
+  local percent filled empty bar="" i speed_txt=""
+  if [[ "$speed" =~ ^[0-9]+$ ]] && [ "$speed" -gt 0 ]; then
+    speed_txt="  $(format_download_bytes "$speed")/s"
+  fi
   if [[ "$total" =~ ^[0-9]+$ ]] && [ "$total" -gt 0 ]; then
     percent=$((size * 100 / total))
     [ "$percent" -gt 100 ] && percent=100
     filled=$((percent * width / 100))
-    bar="$(printf '%*s' "$filled" '' | tr ' ' '=')"
-    if [ "$filled" -lt "$width" ]; then
-      bar="${bar}>$(printf '%*s' $((width - filled - 1)) '')"
-    fi
-    printf '\r下载中 [%-*s] %3d%% %s/%s' "$width" "$bar" "$percent" "$(format_download_bytes "$size")" "$(format_download_bytes "$total")"
+    empty=$((width - filled))
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    printf '\r%b%s%b [%b%s%b] %3d%%  %s / %s%s\033[K' \
+      "$C" "$label" "$NC" "$G" "$bar" "$NC" "$percent" \
+      "$(format_download_bytes "$size")" "$(format_download_bytes "$total")" "$speed_txt" >&2
   else
-    case $((tick % 4)) in
-      0) spin="|" ;;
-      1) spin="/" ;;
-      2) spin="-" ;;
-      *) spin="\\" ;;
-    esac
-    printf '\r下载中 [%s] %s' "$spin" "$(format_download_bytes "$size")"
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    printf '\r%b%s%b %s  %s%s\033[K' \
+      "$C" "${frames[$((tick % 10))]}" "$NC" "$label" "$(format_download_bytes "$size")" "$speed_txt" >&2
   fi
 }
 
 clear_download_progress() {
-  local cols="${COLUMNS:-80}"
-  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
-  printf '\r%*s\r' "$cols" ''
+  printf '\r\033[K' >&2
 }
 
 now_ms() {
@@ -315,18 +326,27 @@ parse_plus_selections() {
 }
 
 ask_confirm_yes() {
-  local prompt="${1:-输入 YES 确认继续，其它任意输入取消: }"
+  local prompt="${1:-输入 yes 确认继续（直接回车取消）: }"
   local ans
-  read -r -p "$prompt" ans
-  [ "$ans" = "YES" ]
+  printf '%s' "$prompt" >&2
+  read -r ans || ans=""
+  [[ "${ans,,}" == "yes" ]]
 }
 
 ask_confirm_yn() {
-  local prompt="${1:-确认继续吗？(y/N): }"
+  local prompt="${1:-确认继续吗？[y/N]: }"
   local ans
   printf '%s' "$prompt" >&2
   read -r ans || ans=""
   [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+ask_confirm_default_yes() {
+  local prompt="${1:-是否继续？[Y/n]: }"
+  local ans
+  printf '%s' "$prompt" >&2
+  read -r ans || ans=""
+  [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]
 }
 
 is_valid_ymd_date() {
@@ -355,9 +375,12 @@ is_valid_port() {
 
 ask_port_or_return() {
   local prompt="$1" default="$2" outvar="$3"
-  local val __retry
+  local val
   while true; do
-    read -r -p "$prompt" val
+    read -r -p "$prompt" val || return 1
+    if [ "$val" = "0" ] || [ "${val,,}" = "q" ]; then
+      return 1
+    fi
     if [ -z "$val" ]; then
       val="$default"
     fi
@@ -365,9 +388,7 @@ ask_port_or_return() {
       printf -v "$outvar" '%s' "$val"
       return 0
     fi
-    warn "端口输入无效：${val}。请输入 1-65535 的数字，回车使用默认值 ${default}。"
-    read -r -p "输入 1 重新填写，其它任意键返回上一级: " __retry
-    [ "${__retry:-}" = "1" ] || return 1
+    warn "端口无效（请输入 1-65535，回车默认 ${default}，输入 0 返回）"
   done
 }
 

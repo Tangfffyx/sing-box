@@ -398,7 +398,7 @@ _config_apply_body() {
   fi
 
   if ! sing-box check -c "$tmp_file" >/dev/null 2>&1; then
-    err "sing-box check 校验未通过，未写入配置。"
+    err "新配置检查未通过，已保留原配置（原因如下）："
     sing-box check -c "$tmp_file" 2>&1 | sed 's/^/  /'
     rm -f "$tmp_file" >/dev/null 2>&1 || true
     return 1
@@ -435,7 +435,18 @@ _config_apply_body() {
   }
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
-  if _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe; then
+  if [ -t 1 ] && [ -t 2 ] && [ "${_RESTART_SINGBOX_QUIET_OK:-0}" != "1" ]; then
+    if run_with_spinner "正在重启 sing-box 服务并等待就绪..." reload_or_restart_singbox_safe; then
+      case "$INIT_SYSTEM" in
+        systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
+        openrc)  openrc_enable_service sing-box default >/dev/null 2>&1 || true ;;
+      esac
+      rm -f "$prev_tmp" >/dev/null 2>&1 || true
+      ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
+      [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已生效。"
+      return 0
+    fi
+  elif _RESTART_SINGBOX_QUIET_OK=1 reload_or_restart_singbox_safe; then
     case "$INIT_SYSTEM" in
       systemd) systemctl enable sing-box >/dev/null 2>&1 || true ;;
       openrc)  openrc_enable_service sing-box default >/dev/null 2>&1 || true ;;
@@ -443,11 +454,11 @@ _config_apply_body() {
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
     # 自动清理旧备份，保留最近 1 个
     ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
-    [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已应用。"
+    [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已生效。"
     return 0
   fi
 
-  err "热载/重启失败：正在回滚。"
+  err "新配置启动失败，正在自动恢复原配置..."
   if [ -f "$prev_tmp" ] && [ -s "$prev_tmp" ]; then
     cp -a "$prev_tmp" "$backup" || warn "失败现场备份未能保存到 $backup"
     if ! cp -a "$prev_tmp" "$CONFIG_FILE"; then

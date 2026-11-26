@@ -53,10 +53,9 @@ ensure_grpcurl() {
   download_url="$(echo "$api_json" | jq -r --arg p "$asset_pattern" '.assets[]?.browser_download_url | select(contains($p))' 2>/dev/null | head -n1)" || true
   [ -n "$download_url" ] || { warn "未找到 grpcurl 适配当前架构的安装包。"; return 1; }
   tmp_dir="$(make_disk_tmp_dir sb-install)" || { warn "创建临时目录失败。"; return 1; }
-  say "下载流量统计组件..."
-  if ! download_file "$download_url" "$tmp_dir/grpcurl.tar.gz" 20 3; then
+  if ! download_file "$download_url" "$tmp_dir/grpcurl.tar.gz" 20 3 "下载流量统计组件"; then
     rm -rf "$tmp_dir"
-    warn "下载 grpcurl 失败。"
+    warn "下载流量统计组件失败。"
     return 1
   fi
   tar -xzf "$tmp_dir/grpcurl.tar.gz" -C "$tmp_dir" || { rm -rf "$tmp_dir"; warn "解压 grpcurl 失败。"; return 1; }

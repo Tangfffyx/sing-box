@@ -9,7 +9,7 @@ RELAY_RULE_BASE_URL="https://raw.githubusercontent.com/SagerNet/sing-geosite/rul
 RELAY_RULE_LOOKUP_URL="https://github.com/SagerNet/sing-geosite/tree/rule-set"
 
 relay_hr() {
-  echo -e "${B}--------------------------------------------------------${NC}"
+  ui_hr
 }
 
 relay_partial_outbound_tag() {
@@ -492,38 +492,15 @@ relay_rule_remove_meta_by_files_json_from() {
 }
 
 relay_normalize_rule_file() {
-  local raw="${1:-}" value
-  value="$(printf '%s' "$raw" | tr -d '[:space:]')"
-  [ -n "$value" ] || return 1
-  if [[ "$value" == *"://"* ]]; then
-    err "请输入 rule-set 文件名，不要输入完整 URL。"
-    return 1
-  fi
-  [[ "$value" == geosite-* ]] || value="geosite-${value}"
-  [[ "$value" == *.srs ]] || value="${value}.srs"
-  [[ "$value" =~ ^geosite-[A-Za-z0-9._@!+-]+\.srs$ ]] || {
-    err "规则名格式无效：$value"
-    return 1
-  }
-  echo "$value"
+  split_rule_normalize_file "$@"
 }
 
 relay_validate_rule_file() {
-  local file="$1" url
-  url="$(relay_rule_url_for_file "$file")"
-  curl -fsIL --connect-timeout 10 --max-time 20 "$url" >/dev/null 2>&1
+  split_rule_validate_remote_file "$@"
 }
 
 relay_preset_rule() {
-  case "$1" in
-    1) echo "AI 服务|geosite-category-ai-!cn.srs" ;;
-    2) echo "Google|geosite-google.srs" ;;
-    3) echo "Netflix|geosite-netflix.srs" ;;
-    4) echo "Disney+|geosite-disney.srs" ;;
-    5) echo "YouTube|geosite-youtube.srs" ;;
-    6) echo "TikTok|geosite-tiktok.srs" ;;
-    *) return 1 ;;
-  esac
+  split_rule_preset_item "$@"
 }
 
 relay_rule_add_meta() {

@@ -1,2 +1,4 @@
 CLAUDE.md
 index.html
+__pycache__/
+*.pyc
