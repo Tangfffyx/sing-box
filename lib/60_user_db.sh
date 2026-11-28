@@ -34,43 +34,70 @@ JSON
 }
 
 user_db_exists() {
-  [ -s "$USER_DB_FILE" ] && jq -e '.enabled == true and (.users.admin != null)' "$USER_DB_FILE" >/dev/null 2>&1
+  [ -f "$USER_DB_FILE" ] && [ -s "$USER_DB_FILE" ] && user_db_valid < "$USER_DB_FILE"
+}
+
+user_db_valid() {
+  jq -es 'length == 1 and (.[0] | .enabled == true and
+    (.users | type == "object" and (.admin | type == "object") and
+      all(.[]; type == "object" and (.enabled | type == "boolean"))))' >/dev/null 2>&1
+}
+
+user_db_is_first_use() {
+  [ ! -e "$USER_DB_FILE" ] && [ ! -L "$USER_DB_FILE" ] &&
+    [ ! -e "$USER_DB_FILE.initialized" ] &&
+    [ ! -e "${SINGBOX_VERSION_STAMP:-}" ] &&
+    [ ! -e "${META_FILE:-}" ] && [ ! -e "${TG_CONFIG_FILE:-}" ] &&
+    [ ! -e "${TG_TASK_RECEIPTS_FILE:-}" ] &&
+    ! compgen -G "$USER_DB_FILE.corrupt.*" >/dev/null &&
+    { [ ! -e "${CONFIG_FILE:-}" ] || jq -es '
+      length == 1 and (.[0] | type == "object" and
+      ((.inbounds // []) | length == 0) and (.experimental.v2ray_api == null))
+    ' "$CONFIG_FILE" >/dev/null 2>&1; }
+}
+
+user_db_restore_hint() {
+  err "无法读取用户数据库 ${USER_DB_FILE}。请从同一次备份恢复用户数据，再重试。"
 }
 
 user_db_load() {
-  if user_db_exists; then
-    cat "$USER_DB_FILE"
-    return 0
+  local db_json
+  if db_json="$(cat "$USER_DB_FILE" 2>/dev/null)" &&
+    printf '%s\n' "$db_json" | user_db_valid; then
+    printf '%s\n' "$db_json"
+  else
+    user_db_restore_hint
+    return 1
   fi
-  if [ -s "$USER_DB_FILE" ] && ! jq -e . "$USER_DB_FILE" >/dev/null 2>&1; then
-    backup_corrupt_json_file "$USER_DB_FILE"
+}
+
+user_db_initialize() {
+  with_manager_lock _user_db_initialize_body
+}
+
+_user_db_initialize_body() {
+  if ! user_db_exists; then
+    user_db_is_first_use || { user_db_restore_hint; return 1; }
+    atomic_write_json_file "$USER_DB_FILE" "$(user_db_min_template)" "用户数据库" || return 1
+    ok "已初始化用户数据库，默认启用 admin 用户。"
   fi
-  user_db_min_template
+  user_db_mark_initialized
+}
+
+user_db_mark_initialized() {
+  [ -f "$USER_DB_FILE.initialized" ] ||
+    atomic_write_json_file "$USER_DB_FILE.initialized" '{}' "用户数据库初始化记录"
 }
 
 user_db_save() {
   with_manager_lock _user_db_save_body "$@"
 }
 
-user_db_touch_data_updated_at() {
-  with_manager_lock _user_db_touch_data_updated_at_body "$@"
-}
-
-_user_db_touch_data_updated_at_body() {
-  user_db_exists || return 0
-  local db_json now_text
-  db_json="$(user_db_load)"
-  now_text="$(date '+%Y-%m-%d %H:%M:%S')"
-  db_json="$(printf '%s\n' "$db_json" | jq --arg now "$now_text" '
-    .meta = (.meta // {})
-    | .meta.data_updated_at_text = $now
-  ')" || return 1
-  user_db_save "$db_json"
-}
-
 _user_db_save_body() {
   local db_json="$1"
-  mkdir -p /etc/sing-box 2>/dev/null || true
+  user_db_exists || { user_db_restore_hint; return 1; }
+  printf '%s\n' "$db_json" | user_db_valid || { err "用户数据检查失败，已保留原文件。"; return 1; }
+  user_db_mark_initialized || return 1
   atomic_write_json_file "$USER_DB_FILE" "$db_json" "用户数据库"
 }
 
@@ -90,8 +117,17 @@ package_text_for_user() {
   if [ "$quota" = "0" ]; then
     echo "不限"
   else
-    echo "${quota}GB"
+    echo "${quota} GiB"
   fi
+}
+
+user_db_set_admin_allowed() {
+  local db="$1" username="$2" allowed="$3"
+  jq --arg user "$username" --argjson allowed "$allowed" '
+    .users[$user].admin_allowed = $allowed
+    | .users[$user].enabled = $allowed
+    | .users[$user].disabled_reason = (if $allowed then null else "manual" end)
+  ' <<< "$db"
 }
 
 user_db_enabled_users() {
@@ -142,18 +178,4 @@ user_db_cleanup_missing_nodes() {
       )
     )
   '
-}
-
-user_db_cleanup_current_and_save() {
-  with_manager_lock _user_db_cleanup_current_and_save_body "$@"
-}
-
-_user_db_cleanup_current_and_save_body() {
-  local db_json json cleaned
-  user_db_exists || return 0
-  db_json="$(user_db_load)"
-  json="$(config_load)"
-  cleaned="$(user_db_cleanup_missing_nodes "$db_json" "$json")" || return 1
-  user_db_save "$cleaned"
-  return 0
 }

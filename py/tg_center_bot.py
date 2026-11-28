@@ -296,7 +296,7 @@ def bind_token(chat_id, tg_id, token):
         pending = cfg.setdefault("pending_bind_tokens", {})
         item = pending.get(token)
         now = int(time.time())
-        if not item or int(item.get("expires_at") or 0) < now:
+        if not item or int(item.get("expires_at") or 0) <= now:
             send_message(chat_id, "绑定链接已失效，请联系管理员重新生成。")
             return
         bindings = cfg.setdefault("bindings", [])

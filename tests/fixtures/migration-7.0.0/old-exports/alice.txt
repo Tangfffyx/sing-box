@@ -1,0 +1,32 @@
+╭────────────────────────────────────────────────────╮
+│                    导出节点配置                    │
+╰────────────────────────────────────────────────────╯
+
+用户：alice
+
+[ss-18080@alice]
+ Clash: - {name: "ss-18080@alice", type: ss, server: 127.0.0.1, port: 18080, cipher: 2022-blake3-aes-128-gcm, password: "AAAAAAAAAAAAAAAAAAAAAA==:AQEBAQEBAQEBAQEBAQEBAQ==", udp: true}
+
+ Quantumult X: shadowsocks=127.0.0.1:18080, method=2022-blake3-aes-128-gcm, password=AAAAAAAAAAAAAAAAAAAAAA==:AQEBAQEBAQEBAQEBAQEBAQ==, udp-relay=true, tag=ss-18080@alice
+
+ 通用链接: ss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206QUFBQUFBQUFBQUFBQUFBQUFBQUFBQT09OkFRRUJBUUVCQVFFQkFRRUJBUUVCQVE9PQ==@127.0.0.1:18080#ss-18080%40alice
+
+ Surge: ss-18080@alice = ss, 127.0.0.1, 18080, encrypt-method=2022-blake3-aes-128-gcm, password=AAAAAAAAAAAAAAAAAAAAAA==:AQEBAQEBAQEBAQEBAQEBAQ==, udp-relay=true
+
+[trojan-18443@alice]
+ Clash: - {name: "trojan-18443@alice", type: trojan, server: 127.0.0.1, port: 18443, password: "fixture-trojan-18443@alice", client-fingerprint: chrome, udp: true, sni: "localhost", alpn: [h2, http/1.1], skip-cert-verify: true}
+
+ Quantumult X: trojan=127.0.0.1:18443, password=fixture-trojan-18443@alice, over-tls=true, tls-host=localhost, tls-verification=false, fast-open=false, udp-relay=true, tag=trojan-18443@alice
+
+ 通用链接: trojan://fixture-trojan-18443%40alice@127.0.0.1:18443?security=tls&sni=localhost&alpn=h2%2Chttp%2F1.1&allowInsecure=1#trojan-18443%40alice
+
+ Surge: trojan-18443@alice = trojan, 127.0.0.1, 18443, password=fixture-trojan-18443@alice, skip-cert-verify=true, sni=localhost
+
+[trojan-18443-to-lab@alice]
+ Clash: - {name: "trojan-18443-to-lab@alice", type: trojan, server: 127.0.0.1, port: 18443, password: "fixture-trojan-18443-to-lab@alice", client-fingerprint: chrome, udp: true, sni: "localhost", alpn: [h2, http/1.1], skip-cert-verify: true}
+
+ Quantumult X: trojan=127.0.0.1:18443, password=fixture-trojan-18443-to-lab@alice, over-tls=true, tls-host=localhost, tls-verification=false, fast-open=false, udp-relay=true, tag=trojan-18443-to-lab@alice
+
+ 通用链接: trojan://fixture-trojan-18443-to-lab%40alice@127.0.0.1:18443?security=tls&sni=localhost&alpn=h2%2Chttp%2F1.1&allowInsecure=1#trojan-18443-to-lab%40alice
+
+ Surge: trojan-18443-to-lab@alice = trojan, 127.0.0.1, 18443, password=fixture-trojan-18443-to-lab@alice, skip-cert-verify=true, sni=localhost

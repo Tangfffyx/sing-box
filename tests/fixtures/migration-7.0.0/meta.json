@@ -1,0 +1,13 @@
+{
+  "relay": {
+    "landings": {
+      "lab": {
+        "server": "127.0.0.1",
+        "port": 11081,
+        "username": "lab",
+        "password": "fixture-landing"
+      }
+    },
+    "rules": []
+  }
+}

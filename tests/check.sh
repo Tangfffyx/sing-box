@@ -6,6 +6,15 @@ bash tests/reliability.sh
 bash tests/migration.sh
 bash tests/export.sh
 bash tests/telegram-tasks.sh
+bash tests/stage-a.sh
+bash tests/stage-b.sh
+bash tests/stage-c.sh
+bash tests/stage-d.sh
+bash tests/stage-e.sh
+bash tests/stage-f.sh
+bash tests/stage-g.sh
+bash tests/stage-h.sh
+bash tests/stage-i-uninstall.sh
 if [ -f tests/tg-center-unit.py ]; then
   python3 tests/tg-center-unit.py
 fi

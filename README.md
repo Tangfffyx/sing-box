@@ -1,71 +1,55 @@
-# Sing-box 多用户与管理脚本
+# sing-box 管理脚本 7.0.0
 
-这是一个基于原版 Sing-box 逻辑的一键管理脚本，专为多用户管理场景设计，自编译版本支持 v2ray_api 流量统计。
+在 Linux 服务器上安装代理节点、管理用户与流量、导出客户端配置。内核发布包支持 amd64 和 arm64，使用 sing-box 1.14.0 或更新版本。
 
-**交流与反馈**：https://t.me/sb_gogogo
+## 第一次使用
 
-## 快速开始
-
-```bash
-wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh && bash sb.sh
-```
-**非root用户：**
-```bash
-wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh && sudo bash sb.sh
-```
-
-* **快捷命令**：安装完成后，在终端输入 `s` 即可唤出管理菜单。
-* **避免冲突**：如果当前系统已安装官方版本的 sing-box，推荐先在菜单中执行“8. 卸载 sing-box”（保留数据），再执行“1. 安装/更新 sing-box”进行环境接管。
-* **升级注意（6.0.9版本之前）**：定时任务结构有变（4 个 cron 合并为 2 个）。推荐先在菜单中执行 `8. 卸载 sing-box`（保留数据），再执行 `1. 安装/更新 sing-box`，让定时任务干净迁移。如果直接覆盖新脚本，进入 `2. 系统工具` 看到摘要里 `实时同步/日常维护：未安装` 提示后，进 `1. 安装/更新` 按提示补齐组件即可。
-
----
-
-## 6.2.0：Hysteria2 入站与代码优化
-
-需要 sing-box **1.14.0 或更新版本**（Gecko 混淆需要 1.14.0+）。
-
-- 新增 Hysteria2 入站，安装菜单第 3 位：自签证书（`hy2-<端口>.crt/.key`）、认证密码与混淆密码分开、混淆默认 Gecko（安装时可切 Salamander 或不启用）、带宽不限。
-- 端口跳跃默认范围 42310-45545（安装时可改）：sing-box 只监听 UDP 443，脚本用 iptables/ip6tables 把该段 UDP 端口重定向到 443（先查后加，持久化保存）；跳跃范围存在 meta.json，按 `hy2-<端口>` 记；卸载/清空配置时，没有其它节点在用就删规则。云安全组仍需手动放行 UDP 42310-45545 和 UDP 443。
-- 导出增加 Hysteria2：Clash、Quantumult X（`port-hopping`、`gecko-password`/`salamander-password`）和通用 `hysteria2://` 链接。
-- 代码优化：安装菜单 9 个协议共用选端口/写入配置助手、TLS 自签证书共用助手、协议排序由注册表派生（不再硬编码序号），行为不变。
-
-## 6.1.9：sing-box 1.14 适配与可靠性修复
-
-需要 sing-box **1.14.0 或更新版本**，当前验证版本为 **1.14.2**。旧内核应先从安装/更新菜单升级，再使用管理功能。
-
-- 远程规则集迁移到 `http_client`，保留自定义下载出站；默认拒绝改为末尾的 `action: reject`，不放开停用用户。
-- 用户投影与路由重建减少重复子进程，已有凭证和顺序保持不变；4 节点 / 40 用户的 VPS 对照测试从 10.5 秒降至 1.0 秒。
-- 修复 Shadowsocks UDP 端口冲突漏检、SS2022 相同双密钥导出遗漏，以及 WS 导出 early-data 字段层级。
-
-
-- 更新内核前用候选二进制检查现有配置，原子替换后明确重启，并检查新进程和已启用的统计 API。失败恢复旧内核与配置；成功保留 `sing-box.bak` 和 `config.json.bak.upgrade`。
-- 流量基线按进程代次和节点用户保存，菜单只合并本次修改的字段；同字段发生并发冲突时提示重新操作。
-- 保留不同条件的路由规则；错过重置日后补执行最近应完成的账期。新用户或调整重置日先建立账期，不追溯清零。
-- 配置未变化时不重启；需要应用运行配置时执行经过检查的重启，会短暂中断连接。
-- 管理写入必须取得文件锁，安装流程会补齐 flock。当前发布架构为 Linux amd64/arm64；旧 Release 不再自动删除。
-
-TG HTTPS/独立节点凭证仍需单独改造；现有公网明文 HTTP 和共享密钥不适合直接暴露于不受信任网络。流量仍是周期采样，进程异常退出前未采样的尾部流量无法恢复；外部短时间连续 HUP 也不能保证精确识别，建议使用脚本的服务操作。
-
-VPS 验收步骤见 [测试清单](docs/TESTING.md)。
-
-开发验证：`bash tests/check.sh`。CI 在 Ubuntu、Alpine 运行回归，并编译 1.14.2 验证九种协议 TCP/UDP、停用与未授权用户、计费、中转、规则下载，以及独立 systemd 服务的升级回滚。实测范围与限制见 [验证结果](docs/VALIDATION-6.1.9.md)。
-
-## 卸载说明
-
-菜单中的 **`8. 卸载 sing-box`** 是保留数据的运行环境卸载：
-
-* 会停止并移除 sing-box 服务。
-* 会标记 TG Bot 为停用。
-* 默认保留 `/etc/sing-box`、`/etc/sing-box-manager`、日志、脚本和快捷命令，方便后续重新安装或恢复。
-
-如需彻底清理脚本与相关配置，再手动执行：
+在服务器上下载脚本后运行。普通用户把最后一行换成 `sudo bash sb.sh`。
 
 ```bash
-rm -f /root/sb.sh
-rm -f /usr/local/bin/s
-rm -rf /etc/sing-box-manager
-rm -rf /etc/sing-box
-rm -rf /var/log/sing-box
-rm -f /var/lock/singbox-manager.lock /var/lock/singbox-tg-agent.lock
-rm -rf /var/lock/singbox-tg-agent.lock.d
+wget -O sb.sh https://raw.githubusercontent.com/Tangfffyx/sing-box/main/sb.sh
+bash sb.sh
 ```
+
+1. 选 **5 安装与卸载 → 1 安装或更新 sing-box**。安装结束后可以直接进入节点管理。
+2. 选 **1 节点管理 → 1 安装协议**。例如选 **4 Shadowsocks（SS2022）**，回车使用推荐端口和自动生成的凭据。云服务器还要在安全组放行所选端口。SS2022 需要客户端支持 2022 加密方法。
+3. 安装完成页会显示本次节点的导出。以后从首页 **4 导出配置** 可以再打开。用支持该协议的客户端扫二维码，或选 **1 通用链接**，复制到客户端的「从剪贴板导入」。需要配置片段时选 **2 Clash / Mihomo** 或 **3 Quantumult X**。导入后连接节点，打开一个网页确认可用。
+
+下次输入 `s` 打开菜单。节点链接和二维码包含连接凭据，请只交给对应用户。
+
+## 日常使用
+
+- **2 中转管理**。先在落地机装 SOCKS5，复制「落地链接」。在中转机粘贴链接，再填一个落地标识。
+- **3 用户管理**。设置节点权限、到期时间和流量限额，从用户详情导出该用户的节点。流量按周期采样。
+- **7 WARP 分流**。先选网站。脚本会优先验证并复用已有 WireProxy。首次注册前会提示确认条款。
+- **8 Telegram Bot**。只有一台服务器时，选「在本机运行机器人」。接入第二台时，从首台的 Telegram Bot 页面复制主控地址和接入密钥。
+- **WebSocket 节点**。VMess-WS 和 VLESS-WS 共用安装入口，默认 VLESS-WS。已有 CDN 时，从「节点管理 → 接入已有 CDN」验证并保存公网入口。
+- **HY2**。推荐配置使用 Gecko 和端口跳跃。安全组需要放行安装页显示的 UDP 主端口及跳跃范围。HY2 的 Gecko 加端口跳跃组合仍待 Quantumult X 真机验收。TUIC 提供通用链接和 Clash / Mihomo。
+
+## 升级
+
+**更新管理脚本。** 先按回退说明保存旧脚本、内核和管理资料。把已核对的新版文件安装到 `/root/sb.sh`，再运行 `s`。单独运行另一个下载路径里的文件时，已有快捷命令可能仍指向旧脚本。
+
+```bash
+sudo install -m 755 ./sb.sh /root/sb.sh
+sudo bash /root/sb.sh
+```
+
+**更新 sing-box 内核。** 走 **5 安装与卸载 → 1 安装或更新 sing-box**。脚本用候选内核检查配置，再重启并检查服务。应用失败会恢复先前的内核和配置。成功升级会保留 `/usr/local/bin/sing-box.bak` 和 `/etc/sing-box/config.json.bak.upgrade`。这两份备份用于内核升级，完整回退还要用同一时间点的管理数据。
+
+**从历史版本升级。** 先保存原配置和旧链接，再安装或更新内核。旧定时任务会迁移到「实时同步」和「日常维护」。升级后用旧链接重连，并核对用户权限、累计流量和中转出口。如果脚本提示用户数据库损坏，先恢复备份。已经用系统软件包安装内核的机器，先备份数据，再按安装页提示处理已有的软件包。
+
+## 卸载
+
+进入 **5 安装与卸载 → 2 卸载 sing-box**。
+
+| 方式 | 停止或删除 | 保留 |
+| --- | --- | --- |
+| **1 仅卸载程序** | 停止并移除 sing-box 服务、已安装内核和旧内核备份、统计组件及脚本定时任务。停止 Telegram Bot 并记录为停用。 | 节点、证书、用户、权限、流量账本、Telegram 设置和绑定、WARP 注册资料、日志、脚本和 `s`。保留已有 HY2 跳跃规则和开机恢复设置。 |
+| **2 彻底卸载并清空全部数据** | 另清除 `/etc/sing-box`、`/etc/sing-box-manager`、sing-box 数据和日志、脚本管理的 HY2 跳跃规则与恢复机制、脚本和 `s`。需要输入 `yes` 确认。 | 外部 WireProxy、CDN、Nginx 和服务商安全组。脚本生成的 WS 片段随管理目录删除。Nginx 站点里手动添加的引用需相应移除。 |
+
+两种方式都不清理你从其他目录下载的脚本副本。使用「仅卸载程序」重装后，可在 Telegram Bot 菜单选 1 恢复。
+
+## 验收与回退
+
+本地构建、首次连接、升级与回退检查见 [7.0.0 验收记录](docs/STAGE-I-VALIDATION.md)。完整退回旧版时，恢复同一时间点的脚本、内核及管理资料，详见 [回退步骤](docs/ROLLBACK-7.0.0.md)。

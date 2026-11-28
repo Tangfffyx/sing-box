@@ -1,0 +1,91 @@
+{
+  "enabled": true,
+  "meta": {
+    "data_updated_at_text": "2026-11-28 09:00:00",
+    "usage": {
+      "process": "fixture-core:1",
+      "start": 100,
+      "counters": {
+        "ss-18080@alice": {
+          "uplink": 25000,
+          "downlink": 160000
+        },
+        "ss-18080@bob": {
+          "uplink": 5000,
+          "downlink": 15000
+        }
+      }
+    }
+  },
+  "users": {
+    "admin": {
+      "enabled": true,
+      "disabled_reason": null,
+      "quota_gb": 0,
+      "used_up_bytes": 0,
+      "used_down_bytes": 0,
+      "manual_added_bytes": 0,
+      "last_live_up_bytes": 0,
+      "last_live_down_bytes": 0,
+      "last_reset_period": "2026-11",
+      "reset_day": 5,
+      "expire_at": "0",
+      "allow_all_nodes": true,
+      "nodes": []
+    },
+    "alice": {
+      "enabled": true,
+      "disabled_reason": null,
+      "quota_gb": 10,
+      "used_up_bytes": 300000,
+      "used_down_bytes": 1700000,
+      "manual_added_bytes": 10000,
+      "last_live_up_bytes": 25000,
+      "last_live_down_bytes": 160000,
+      "last_reset_period": "2026-11",
+      "reset_day": 5,
+      "expire_at": "0",
+      "allow_all_nodes": false,
+      "nodes": [
+        "ss-18080",
+        "trojan-18443",
+        "trojan-18443-to-lab"
+      ]
+    },
+    "bob": {
+      "enabled": true,
+      "disabled_reason": null,
+      "quota_gb": 10,
+      "used_up_bytes": 75000,
+      "used_down_bytes": 225000,
+      "manual_added_bytes": 5000,
+      "last_live_up_bytes": 5000,
+      "last_live_down_bytes": 15000,
+      "last_reset_period": "2026-11",
+      "reset_day": 5,
+      "expire_at": "0",
+      "allow_all_nodes": false,
+      "nodes": [
+        "ss-18080",
+        "socks-11080"
+      ]
+    },
+    "paused": {
+      "enabled": false,
+      "disabled_reason": "manual",
+      "quota_gb": 10,
+      "used_up_bytes": 10,
+      "used_down_bytes": 20,
+      "manual_added_bytes": 0,
+      "last_live_up_bytes": 0,
+      "last_live_down_bytes": 0,
+      "last_reset_period": "2026-11",
+      "reset_day": 5,
+      "expire_at": "0",
+      "allow_all_nodes": false,
+      "nodes": [
+        "ss-18080"
+      ]
+    }
+  }
+}

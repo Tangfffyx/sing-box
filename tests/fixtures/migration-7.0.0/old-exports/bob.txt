@@ -1,0 +1,17 @@
+╭────────────────────────────────────────────────────╮
+│                    导出节点配置                    │
+╰────────────────────────────────────────────────────╯
+
+用户：bob
+
+[ss-18080@bob]
+ Clash: - {name: "ss-18080@bob", type: ss, server: 127.0.0.1, port: 18080, cipher: 2022-blake3-aes-128-gcm, password: "AAAAAAAAAAAAAAAAAAAAAA==:AgICAgICAgICAgICAgICAg==", udp: true}
+
+ Quantumult X: shadowsocks=127.0.0.1:18080, method=2022-blake3-aes-128-gcm, password=AAAAAAAAAAAAAAAAAAAAAA==:AgICAgICAgICAgICAgICAg==, udp-relay=true, tag=ss-18080@bob
+
+ 通用链接: ss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206QUFBQUFBQUFBQUFBQUFBQUFBQUFBQT09OkFnSUNBZ0lDQWdJQ0FnSUNBZ0lDQWc9PQ==@127.0.0.1:18080#ss-18080%40bob
+
+ Surge: ss-18080@bob = ss, 127.0.0.1, 18080, encrypt-method=2022-blake3-aes-128-gcm, password=AAAAAAAAAAAAAAAAAAAAAA==:AgICAgICAgICAgICAgICAg==, udp-relay=true
+
+[socks-11080@bob]
+ 参数: server=127.0.0.1  port=11080  username=socks-11080@bob  password=fixture-socks-bob

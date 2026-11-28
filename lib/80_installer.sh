@@ -636,6 +636,12 @@ install_or_update_singbox() {
     return 1
   fi
 
+  if ! user_db_initialize; then
+    rm -rf "$tmp_dir"
+    pause
+    return 1
+  fi
+
   ui_step 5 5 "写入内核并启动服务"
   if ! run_with_spinner "正在部署内核并验证服务运行..." with_manager_lock install_candidate_singbox "$tmp_dir/sing-box" "$tag"; then
     rm -rf "$tmp_dir"
@@ -645,9 +651,8 @@ install_or_update_singbox() {
   rm -rf "$tmp_dir"
 
   ensure_sb_shortcut || true
-  ensure_user_manager_ready || warn "用户数据初始化未完成，进入用户管理时会自动重试。"
-  install_periodic_sync_cron || warn "实时同步定时任务未能自动写入，稍后可在“安装与更新”中修复。"
-  install_daily_maintenance_cron || warn "日常维护定时任务未能自动写入，稍后可在“安装与更新”中修复。"
+  install_periodic_sync_cron || warn "实时同步定时任务未能自动写入，稍后可在「安装与卸载」中修复。"
+  install_daily_maintenance_cron || warn "日常维护定时任务未能自动写入，稍后可在「安装与卸载」中修复。"
   remove_user_watch_cron || true
   remove_log_maintain_cron || true
   remove_tg_agent_cron || true
@@ -804,104 +809,164 @@ chrony_service_enable() {
   esac
 }
 
-chrony_timeout() {
-  run_with_timeout "$@"
-}
-
-chronyc_tracking_ready() {
-  chrony_timeout 3 chronyc tracking >/dev/null 2>&1
-}
-
-chrony_service_status() {
-  local service="$1"
-  if chrony_service_running "$service"; then
-    ok "chrony: 运行中"
-  else
-    warn "chrony: 未运行"
-  fi
-}
-
-chrony_prepare_for_service_control() {
-  local service="$1"
-  if [ "$INIT_SYSTEM" = "systemd" ]; then
-    systemctl stop systemd-timesyncd >/dev/null 2>&1 || true
-    systemctl disable systemd-timesyncd >/dev/null 2>&1 || true
-    systemctl reset-failed "$service" >/dev/null 2>&1 || true
-  fi
-}
-
-chrony_repair_service() {
-  local service="$1"
-  chrony_prepare_for_service_control "$service"
-  if chrony_service_start "$service" >/dev/null 2>&1; then
-    sleep 1
-    chrony_service_running "$service"
-    return
-  fi
-
+# Clock checks are only called by new SS2022/VMess installation batches.
+install_clock_service_active() {
   case "$INIT_SYSTEM" in
-    systemd) systemctl stop "$service" >/dev/null 2>&1 || true ;;
-    openrc)  openrc_stop_service "$service" >/dev/null 2>&1 || true ;;
+    systemd) systemctl is-active --quiet "$1" ;;
+    openrc)  openrc_service_running "$1" ;;
+    *) return 1 ;;
   esac
-  pkill -9 chronyd >/dev/null 2>&1 || true
-  rm -f /run/chrony/chronyd.pid >/dev/null 2>&1 || true
-  chrony_service_start "$service" >/dev/null 2>&1 || return 1
-  sleep 1
-  chrony_service_running "$service"
 }
 
-sync_system_time_chrony() {
-  require_root
-  clear
-  echo -e "${R}--- 一键同步系统时间 ---${NC}"
-  if ! has_cmd chronyc; then
-    warn "未检测到 chrony，开始安装..."
-    install_pkg chrony || { err "chrony 安装失败。"; pause; return 1; }
-    local installed_service
-    installed_service="$(chrony_service_name)"
-    [ -n "$installed_service" ] && chrony_service_enable "$installed_service"
+install_clock_service() {
+  local service
+  for service in chrony chronyd systemd-timesyncd ntpd ntpsec ntp openntpd; do
+    if install_clock_service_active "$service" 2>/dev/null; then printf '%s\n' "$service"; return; fi
+  done
+  # An unmanaged daemon is still an existing clock service.
+  if has_cmd pgrep; then
+    for service in chronyd ntpd; do
+      if pgrep -x "$service" >/dev/null 2>&1; then printf '%s\n' "$service"; return; fi
+    done
   fi
-  has_cmd chronyc || { err "chrony 安装后仍未找到 chronyc，无法继续校时。"; pause; return 1; }
+  return 1
+}
 
-  local chrony_service
-  chrony_service="$(chrony_service_name)"
-  if [ -z "$chrony_service" ]; then
-    err "chrony 已安装，但未找到可用服务（OpenRC 通常应为 chronyd）。"
-    warn "当前可能是 Alpine/LXC 精简环境，缺少 chrony 的 OpenRC 服务脚本。"
-    warn "如果这是 LXC 容器，请在宿主机校准时间，容器会跟随宿主机时间。"
-    pause
-    return 1
+install_clock_reports_synchronized() {
+  local report
+  if [ "$INIT_SYSTEM" = systemd ] && has_cmd timedatectl &&
+    [ "$(run_with_timeout 3 timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; then
+    return 0
   fi
+  if has_cmd chronyc; then
+    report="$(LC_ALL=C run_with_timeout 3 chronyc tracking 2>/dev/null)" &&
+      awk -F: '
+        /Leap status/ && $2 ~ /^[[:space:]]*Normal/ {normal=1}
+        /System time/ {
+          split($2, parts, " "); offset=parts[1]+0
+          if (offset < 0) offset=-offset
+          if (parts[1] ~ /^[-+]?[0-9]/ && offset <= 5) close_enough=1
+        }
+        END { exit !(normal && close_enough) }
+      ' <<< "$report" && return 0
+  fi
+  if has_cmd ntpq; then
+    report="$(LC_ALL=C run_with_timeout 3 ntpq -pn 2>/dev/null)" &&
+      awk '/^[*]/ && $9 ~ /^[-+]?[0-9]/ && $9 >= -5000 && $9 <= 5000 {ok=1} END {exit !ok}' <<< "$report" &&
+      return 0
+  fi
+  if has_cmd ntpctl; then
+    report="$(run_with_timeout 3 ntpctl -s status 2>/dev/null)" && grep -q 'clock synced' <<< "$report" && return 0
+  fi
+  return 1
+}
 
-  if ! chrony_service_running "$chrony_service" || ! chronyc_tracking_ready; then
-    warn "开始修复 chrony 服务状态..."
-    if ! chrony_repair_service "$chrony_service"; then
-      err "chrony 服务未能启动：${chrony_service}"
-      warn "当前环境可能不允许容器主动校时，请在宿主机校准时间。"
-      chrony_service_status "$chrony_service"
-      pause
+install_clock_epoch_utc() {
+  date -u -d "$1" +%s 2>/dev/null || date -u -j -f '%Y-%m-%d %H:%M:%S' "$1" +%s 2>/dev/null
+}
+
+# 0: close enough. 1: confirmed offset. 2: could not measure reliably.
+install_clock_probe() {
+  local server before after measured remote offset first=''
+  for server in time.cloudflare.com time.apple.com; do
+    before="$(date +%s)"
+    measured="$(TZ=UTC run_with_timeout 4 sing-box tools synctime --server "$server" --format '2006-01-02 15:04:05' 2>/dev/null)" || continue
+    after="$(date +%s)"
+    [[ "$measured" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || continue
+    (( after >= before && after - before <= 2 )) || continue
+    remote="$(install_clock_epoch_utc "$measured")" || continue
+    offset=$((remote - (before + after) / 2))
+    if (( offset >= -5 && offset <= 5 )); then return 0; fi
+    if [ -n "$first" ] && (( offset - first >= -2 && offset - first <= 2 )); then return 1; fi
+    first="$offset"
+  done
+  return 2
+}
+
+install_clock_can_adjust() {
+  local capabilities
+  capabilities="$(awk '/^CapEff:/ {print $2}' /proc/self/status 2>/dev/null)" || return 1
+  [[ "$capabilities" =~ ^[[:xdigit:]]+$ ]] && (( (16#$capabilities & (1 << 25)) != 0 ))
+}
+
+install_clock_wait() {
+  local started=$SECONDS
+  while (( SECONDS - started < 30 )); do
+    install_clock_reports_synchronized && return 0
+    ui_echo "等待时间服务同步，已等待 $((SECONDS - started)) 秒。"
+    sleep 3
+  done
+  install_clock_reports_synchronized || install_clock_probe
+}
+
+install_clock_correct() {
+  local service="$1" verification=0
+  case "$service" in
+    chrony|chronyd)
+      has_cmd chronyc && run_with_timeout 5 chronyc -a makestep >/dev/null 2>&1 || true
+      ;;
+    systemd-timesyncd)
+      # Restart the already-running client only after two sources confirm a skew.
+      run_with_timeout 5 systemctl restart systemd-timesyncd || return 1
+      ;;
+    ntpd|ntpsec|ntp|openntpd)
+      # Let the running daemon converge. Do not replace another time service.
+      ;;
+    '')
+      service="$(chrony_service_name)"
+      if ! has_cmd chronyc; then
+        ui_echo "未找到时间服务，正在安装 chrony。"
+        run_with_spinner "正在安装 chrony" install_pkg chrony || return 1
+      fi
+      service="$(chrony_service_name)"
+      if [ "$INIT_SYSTEM" = openrc ] && [ -z "$service" ]; then
+        run_with_spinner "正在安装 OpenRC 时间服务" install_pkg chrony-openrc || return 1
+        service="$(chrony_service_name)"
+      fi
+      [ -n "$service" ] || return 1
+      chrony_service_start "$service" || return 1
+      chrony_service_enable "$service"
+      ;;
+  esac
+  install_clock_wait || return 1
+  install_clock_probe || verification=$?
+  case "$verification" in
+    0) return 0 ;;
+    2) install_clock_reports_synchronized ;;
+    *) return 1 ;;
+  esac
+}
+
+protocol_install_time_guard() {
+  local probe service response
+  install_clock_reports_synchronized && return 0
+  while true; do
+    ui_echo "正在检查系统时间。"
+    probe=0
+    run_with_spinner "正在核对时间源" install_clock_probe || probe=$?
+    if [ "$probe" = 0 ]; then return 0; fi
+    service="$(install_clock_service)" || service=''
+    if [ "$probe" = 2 ] && [ -n "$service" ]; then
+      probe=0
+      install_clock_wait || probe=$?
+      if [ "$probe" = 0 ]; then return 0; fi
+    fi
+    if [ "$probe" = 1 ]; then
+      if ! install_clock_can_adjust; then
+        warn "本机时间有偏差，当前环境不能改时间。请先在宿主机校时。"
+        return 1
+      fi
+      if install_clock_correct "$service"; then return 0; fi
+      warn "校时未通过，暂缓本批 SS2022 和 VMess。"
       return 1
     fi
-    chrony_service_enable "$chrony_service"
-  fi
-
-  if ! chronyc_tracking_ready; then
-    err "chrony 服务已启动，但无法读取同步状态。"
-    warn "当前环境可能不允许容器主动校时，请在宿主机校准时间。"
-    chrony_service_status "$chrony_service"
-    pause
-    return 1
-  fi
-
-  local step_out
-  if step_out="$(chrony_timeout 5 chronyc -a makestep 2>&1)"; then
-    ok "时间同步完成。"
-  else
-    warn "当前环境可能不允许容器主动校时，请在宿主机校准时间。"
-    [ -n "$step_out" ] && ui_echo "$step_out"
-  fi
-  chrony_service_status "$chrony_service"
-  pause
+    read -r -p "暂时无法核对时间。r 重试，c 继续安装，回车跳过 SS2022 和 VMess: " response || return 1
+    case "$response" in
+      r|R) ;;
+      c|C) return 0 ;;
+      *) return 1 ;;
+    esac
+  done
 }
 
 # ---------- 卸载 ----------
@@ -1013,7 +1078,7 @@ uninstall_singbox_keep_config() {
 install_and_uninstall_menu() {
   while true; do
     clear
-    print_rect_title "安装 / 更新 / 卸载"
+    print_rect_title "安装与卸载"
     singbox_status_summary
     ui_hr
     echo -e "  ${C}1.${NC} 安装或更新 sing-box"

@@ -41,7 +41,7 @@ dd if=/dev/zero of="$TMP_SMOKE/payload" bs=65536 count=1 2>/dev/null
 python3 -m http.server "$http_port" --bind 127.0.0.1 --directory "$TMP_SMOKE" > "$TMP_SMOKE/http.log" 2>&1 &
 http_pid=$!
 start_core() {
-  "$CORE" run -c "$TMP_SMOKE/config.json" > "$TMP_SMOKE/core.log" 2>&1 &
+  "$CORE" -D "$TMP_SMOKE" run -c "$TMP_SMOKE/config.json" > "$TMP_SMOKE/core.log" 2>&1 &
   core_pid=$!
   local attempt
   for ((attempt=0;attempt<40;attempt++)); do
@@ -55,6 +55,17 @@ start_core() {
 }
 INIT_SYSTEM=systemd
 systemctl() { echo "$core_pid"; }
+if [ "$(uname -s)" != Linux ]; then
+  # Keep real core accounting covered where the Linux /proc identity is unavailable.
+  singbox_process_token() { kill -0 "$core_pid" && printf 'fixture:%s\n' "$core_pid"; }
+  awk() {
+    if [ "${2:-}" = /proc/uptime ]; then
+      python3 -c 'import time; print(int(time.monotonic()))'
+    else
+      command awk "$@"
+    fi
+  }
+fi
 start_core
 empty="$(query_v2ray_api_stats_json)"
 [ "$empty" = '[]' ]

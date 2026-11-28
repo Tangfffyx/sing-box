@@ -1,0 +1,51 @@
+{
+  "billable_bytes": {
+    "admin": 0,
+    "alice": 2010000,
+    "bob": 305000,
+    "paused": 30
+  },
+  "allowed": {
+    "alice": [
+      "ss-18080",
+      "trojan-18443",
+      "trojan-18443-to-lab"
+    ],
+    "bob": [
+      "ss-18080",
+      "socks-11080"
+    ],
+    "paused": [
+      "ss-18080"
+    ]
+  },
+  "disabled": [
+    "paused"
+  ],
+  "usage_next": {
+    "process": "fixture-core:1",
+    "start": 100,
+    "stats": [
+      {
+        "name": "user>>>ss-18080@alice>>>traffic>>>uplink",
+        "value": "25040"
+      },
+      {
+        "name": "user>>>ss-18080@alice>>>traffic>>>downlink",
+        "value": "160060"
+      },
+      {
+        "name": "user>>>ss-18080@bob>>>traffic>>>uplink",
+        "value": "5000"
+      },
+      {
+        "name": "user>>>ss-18080@bob>>>traffic>>>downlink",
+        "value": "15000"
+      }
+    ]
+  },
+  "after_usage_next": {
+    "alice": 2010100,
+    "bob": 305000
+  }
+}

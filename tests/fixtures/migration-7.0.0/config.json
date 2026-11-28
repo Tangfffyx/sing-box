@@ -1,0 +1,134 @@
+{
+  "inbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "ss-18080",
+      "listen": "127.0.0.1",
+      "listen_port": 18080,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "AAAAAAAAAAAAAAAAAAAAAA==",
+      "users": [
+        {
+          "name": "ss-18080",
+          "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+        },
+        {
+          "name": "ss-18080@alice",
+          "password": "AQEBAQEBAQEBAQEBAQEBAQ=="
+        },
+        {
+          "name": "ss-18080@bob",
+          "password": "AgICAgICAgICAgICAgICAg=="
+        },
+        {
+          "name": "ss-18080@paused",
+          "password": "AwMDAwMDAwMDAwMDAwMDAw=="
+        }
+      ]
+    },
+    {
+      "type": "trojan",
+      "tag": "trojan-18443",
+      "listen": "127.0.0.1",
+      "listen_port": 18443,
+      "users": [
+        {
+          "name": "trojan-18443",
+          "password": "fixture-trojan-18443"
+        },
+        {
+          "name": "trojan-18443@alice",
+          "password": "fixture-trojan-18443@alice"
+        },
+        {
+          "name": "trojan-18443-to-lab",
+          "password": "fixture-trojan-18443-to-lab"
+        },
+        {
+          "name": "trojan-18443-to-lab@alice",
+          "password": "fixture-trojan-18443-to-lab@alice"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "localhost",
+        "certificate_path": "test-cert.pem",
+        "key_path": "test-key.pem"
+      }
+    },
+    {
+      "type": "socks",
+      "tag": "socks-11080",
+      "listen": "127.0.0.1",
+      "listen_port": 11080,
+      "users": [
+        {
+          "username": "socks-11080",
+          "password": "fixture-socks-admin"
+        },
+        {
+          "username": "socks-11080@bob",
+          "password": "fixture-socks-bob"
+        }
+      ]
+    },
+    {
+      "type": "vmess",
+      "tag": "vmess-ws-18001",
+      "listen": "127.0.0.1",
+      "listen_port": 18001,
+      "users": [
+        {
+          "name": "vmess-ws-18001",
+          "uuid": "7b0b20ca-2195-4fda-9960-178e2ab75212",
+          "alterId": 0
+        }
+      ],
+      "transport": {
+        "type": "ws",
+        "path": "/old-ws",
+        "max_early_data": 2048,
+        "early_data_header_name": "Sec-WebSocket-Protocol"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "socks",
+      "tag": "out-trojan-18443-to-lab",
+      "server": "127.0.0.1",
+      "server_port": 11081,
+      "username": "lab",
+      "password": "fixture-landing"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "domain": [
+          "blocked.example"
+        ],
+        "action": "reject"
+      },
+      {
+        "auth_user": [
+          "trojan-18443-to-lab",
+          "trojan-18443-to-lab@alice"
+        ],
+        "action": "route",
+        "outbound": "out-trojan-18443-to-lab"
+      },
+      {
+        "auth_user": [
+          "ss-18080@paused"
+        ],
+        "action": "reject"
+      }
+    ],
+    "final": "direct"
+  }
+}

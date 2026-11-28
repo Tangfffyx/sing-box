@@ -1,0 +1,18 @@
+{
+  "bindings": [
+    {
+      "tg_user_id": 101,
+      "chat_id": 101,
+      "vps_id": "fixture-vps",
+      "vps_name": "Fixture VPS",
+      "username": "alice",
+      "active": true,
+      "created_at": 1795827600
+    }
+  ],
+  "user_settings": {
+    "101": {
+      "notify": true
+    }
+  }
+}

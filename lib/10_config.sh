@@ -305,7 +305,7 @@ with_manager_lock() {
   if { exec {_lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
     if flock "$_lock_fd"; then
       _CONFIG_LOCK_HELD=1
-      if "$@"; then _rc=0; else _rc=$?; fi
+      if manager_recover_pending && "$@"; then _rc=0; else _rc=$?; fi
       _CONFIG_LOCK_HELD=0
       { exec {_lock_fd}>&-; } 2>/dev/null || true
     else
@@ -318,6 +318,80 @@ with_manager_lock() {
     _rc=1
   fi
   return $_rc
+}
+
+manager_transaction_begin() {
+  local pending="$USER_DB_FILE.pending" snapshot entry path
+  snapshot="$(mktemp -d "$pending.new.XXXXXX")" || return 1
+  for entry in db config meta; do
+    path="$(manager_transaction_path "$entry")"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      cp -p "$path" "$snapshot/$entry" || { rm -rf "$snapshot"; return 1; }
+    fi
+  done
+  if singbox_service_active; then
+    touch "$snapshot/service-active" || { rm -rf "$snapshot"; return 1; }
+  fi
+  mv "$snapshot" "$pending" || { rm -rf "$snapshot"; return 1; }
+}
+
+manager_transaction_path() {
+  case "$1" in
+    db) printf '%s\n' "$USER_DB_FILE" ;;
+    config) printf '%s\n' "$CONFIG_FILE" ;;
+    meta) printf '%s\n' "$META_FILE" ;;
+  esac
+}
+
+manager_transaction_end() {
+  local pending="$USER_DB_FILE.pending" completed
+  completed="$(mktemp -d "$pending.done.XXXXXX")" || return 1
+  mv "$pending" "$completed/snapshot" || return 1
+  rm -rf "$completed" || true
+}
+
+manager_recover_pending() {
+  [ -n "${USER_DB_FILE:-}" ] || return 0
+  local pending="$USER_DB_FILE.pending" entry path tmp
+  [ -d "$pending" ] || return 0
+  warn "发现未完成的用户变更，正在恢复上一次配置和账本。"
+  if [ -f "$pending/config" ] || [ -e "$CONFIG_FILE" ]; then
+    if ! cmp -s "$pending/config" "$CONFIG_FILE"; then
+      touch "$pending/runtime-changed" || return 1
+    fi
+  fi
+  for entry in config meta db; do
+    path="$(manager_transaction_path "$entry")"
+    if [ -f "$pending/$entry" ]; then
+      tmp="$(mktemp "$path.restore.XXXXXX")" || return 1
+      if ! cp -p "$pending/$entry" "$tmp" || ! mv -f "$tmp" "$path"; then
+        rm -f "$tmp"
+        err "恢复失败，请检查 ${path}。备份保留在 ${pending}。"
+        return 1
+      fi
+    else
+      rm -f "$path" || return 1
+    fi
+  done
+  if [ -f "$pending/ws-origin-host" ] && ! ws_cdn_restore_pending "$pending"; then
+    err "反代恢复未完成，备份已保留，请检查 Nginx 后再试。"
+    return 1
+  fi
+  if [ -f "$pending/runtime-changed" ]; then
+    if [ -f "$pending/service-active" ]; then
+      if ! reload_or_restart_singbox_safe; then
+        err "已恢复磁盘数据，服务尚未就绪。请检查 sing-box 后重试。"
+        return 1
+      fi
+    elif singbox_service_active; then
+      case "$INIT_SYSTEM" in
+        systemd) systemctl stop sing-box || return 1 ;;
+        openrc) openrc_stop_service sing-box || return 1 ;;
+        *) return 1 ;;
+      esac
+    fi
+  fi
+  manager_transaction_end
 }
 
 config_apply() {
@@ -364,7 +438,7 @@ _config_apply_body() {
 
   if ! echo "$normalized" | jq -e '
     (.route.final // "") as $final
-    | ($final == "" or ([.outbounds[]? | (.tag // "")] | index($final) != null))
+    | ($final == "" or ([(.outbounds[]?, .endpoints[]?) | (.tag // "")] | index($final) != null))
   ' >/dev/null 2>&1; then
     err "配置校验失败：route.final 指向的 outbound 不存在。"
     return 1
@@ -406,7 +480,7 @@ _config_apply_body() {
 
   local ts backup prev_tmp
   ts="$(date +%Y%m%d_%H%M%S)"
-  backup="/etc/sing-box/config.json.bak.fail.$ts"
+  backup="${CONFIG_FILE}.bak.fail.$ts"
   prev_tmp="$(mktemp "${CONFIG_FILE}.prev.XXXXXX")" || {
     err "创建回滚临时文件失败。"
     rm -f "$tmp_file" >/dev/null 2>&1 || true
@@ -442,7 +516,7 @@ _config_apply_body() {
         openrc)  openrc_enable_service sing-box default >/dev/null 2>&1 || true ;;
       esac
       rm -f "$prev_tmp" >/dev/null 2>&1 || true
-      ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
+      ls -1t "${CONFIG_FILE}".bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
       [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已生效。"
       return 0
     fi
@@ -453,7 +527,7 @@ _config_apply_body() {
     esac
     rm -f "$prev_tmp" >/dev/null 2>&1 || true
     # 自动清理旧备份，保留最近 1 个
-    ls -1t /etc/sing-box/config.json.bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
+    ls -1t "${CONFIG_FILE}".bak.fail.* 2>/dev/null | tail -n +2 | xargs rm -f -- 2>/dev/null || true
     [ "${_CONFIG_APPLY_QUIET_OK:-0}" = "1" ] || ok "配置已生效。"
     return 0
   fi

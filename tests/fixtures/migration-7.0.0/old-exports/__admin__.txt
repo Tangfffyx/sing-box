@@ -1,0 +1,44 @@
+╭────────────────────────────────────────────────────╮
+│                    导出节点配置                    │
+╰────────────────────────────────────────────────────╯
+
+直连节点
+
+[ss-18080]
+ Clash: - {name: "ss-18080", type: ss, server: 127.0.0.1, port: 18080, cipher: 2022-blake3-aes-128-gcm, password: "AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAA==", udp: true}
+
+ Quantumult X: shadowsocks=127.0.0.1:18080, method=2022-blake3-aes-128-gcm, password=AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAA==, udp-relay=true, tag=ss-18080
+
+ 通用链接: ss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206QUFBQUFBQUFBQUFBQUFBQUFBQUFBQT09OkFBQUFBQUFBQUFBQUFBQUFBQUFBQUE9PQ==@127.0.0.1:18080#ss-18080
+
+ Surge: ss-18080 = ss, 127.0.0.1, 18080, encrypt-method=2022-blake3-aes-128-gcm, password=AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAA==, udp-relay=true
+
+[socks-11080]
+ 参数: server=127.0.0.1  port=11080  username=socks-11080  password=fixture-socks-admin
+
+[trojan-18443]
+ Clash: - {name: "trojan-18443", type: trojan, server: 127.0.0.1, port: 18443, password: "fixture-trojan-18443", client-fingerprint: chrome, udp: true, sni: "localhost", alpn: [h2, http/1.1], skip-cert-verify: true}
+
+ Quantumult X: trojan=127.0.0.1:18443, password=fixture-trojan-18443, over-tls=true, tls-host=localhost, tls-verification=false, fast-open=false, udp-relay=true, tag=trojan-18443
+
+ 通用链接: trojan://fixture-trojan-18443@127.0.0.1:18443?security=tls&sni=localhost&alpn=h2%2Chttp%2F1.1&allowInsecure=1#trojan-18443
+
+ Surge: trojan-18443 = trojan, 127.0.0.1, 18443, password=fixture-trojan-18443, skip-cert-verify=true, sni=localhost
+
+[trojan-18443-to-lab]
+ Clash: - {name: "trojan-18443-to-lab", type: trojan, server: 127.0.0.1, port: 18443, password: "fixture-trojan-18443-to-lab", client-fingerprint: chrome, udp: true, sni: "localhost", alpn: [h2, http/1.1], skip-cert-verify: true}
+
+ Quantumult X: trojan=127.0.0.1:18443, password=fixture-trojan-18443-to-lab, over-tls=true, tls-host=localhost, tls-verification=false, fast-open=false, udp-relay=true, tag=trojan-18443-to-lab
+
+ 通用链接: trojan://fixture-trojan-18443-to-lab@127.0.0.1:18443?security=tls&sni=localhost&alpn=h2%2Chttp%2F1.1&allowInsecure=1#trojan-18443-to-lab
+
+ Surge: trojan-18443-to-lab = trojan, 127.0.0.1, 18443, password=fixture-trojan-18443-to-lab, skip-cert-verify=true, sni=localhost
+
+[vmess-ws-18001]
+ Clash: - {name: vmess-ws-18001, type: vmess, server: 127.0.0.1, port: 443, uuid: 7b0b20ca-2195-4fda-9960-178e2ab75212, alterId: 0, cipher: auto, udp: true, tls: true, network: ws, servername: example.com, ws-opts: {path: "/old-ws", headers: {Host: example.com}, max-early-data: 2048, early-data-header-name: Sec-WebSocket-Protocol}}
+
+ Quantumult X: vmess=127.0.0.1:443, method=chacha20-poly1305, password=7b0b20ca-2195-4fda-9960-178e2ab75212, obfs=wss, obfs-host=example.com, obfs-uri=/old-ws?ed=2048, fast-open=false, udp-relay=true, tag=vmess-ws-18001
+
+ 通用链接: vmess://eyJ2IjoiMiIsInBzIjoidm1lc3Mtd3MtMTgwMDEiLCJhZGQiOiIxMjcuMC4wLjEiLCJwb3J0IjoiNDQzIiwiaWQiOiI3YjBiMjBjYS0yMTk1LTRmZGEtOTk2MC0xNzhlMmFiNzUyMTIiLCJhaWQiOiIwIiwic2N5IjoiYXV0byIsIm5ldCI6IndzIiwidHlwZSI6Im5vbmUiLCJob3N0IjoiZXhhbXBsZS5jb20iLCJwYXRoIjoiL29sZC13cz9lZD0yMDQ4IiwidGxzIjoidGxzIiwic25pIjoiZXhhbXBsZS5jb20ifQ==
+
+ Surge: vmess-ws-18001 = vmess, 127.0.0.1, 443, username=7b0b20ca-2195-4fda-9960-178e2ab75212, tls=true, vmess-aead=true, ws=true, ws-path=/old-ws?ed=2048, sni=example.com, ws-headers=Host:example.com, skip-cert-verify=false, udp-relay=true, tfo=false

@@ -3,20 +3,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 for module in 00_base 01_utils 10_config 20_protocol 30_route 40_relay 50_v2ray_api 64_warp; do source "lib/$module.sh"; done
+GRPCURL_BIN="$(command -v grpcurl)"
 T=$(mktemp -d); pids=(); core_pid=''
 cleanup() { for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done; [ -z "$core_pid" ] || kill "$core_pid" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
-read -r entry_port landing_port api_port http_port < <(python3 - <<'PY'
+read -r entry_port landing_port api_port http_port other_port < <(python3 - <<'PY'
 import socket
-ss=[socket.socket() for _ in range(4)]
+ss=[socket.socket() for _ in range(5)]
 for s in ss:s.bind(('127.0.0.1',0))
 print(*(s.getsockname()[1] for s in ss))
 PY
 )
-echo '{"version":3,"rules":[{"ip_cidr":["127.0.0.1/32"]}]}' > "$T/rules.json"
+jq -nc --argjson port "$http_port" '{version:3,rules:[{port:[$port]}]}' > "$T/rules.json"
 sing-box rule-set compile -o "$T/test.srs" "$T/rules.json"
 printf payload > "$T/payload"
 python3 -m http.server "$http_port" --bind 127.0.0.1 --directory "$T" > "$T/http.log" 2>&1 & pids+=("$!")
+python3 -m http.server "$other_port" --bind 127.0.0.1 --directory "$T" > "$T/other.log" 2>&1 & pids+=("$!")
 jq -nc --argjson port "$landing_port" '{log:{level:"info"},inbounds:[{type:"socks",listen:"127.0.0.1",listen_port:$port}],outbounds:[{type:"direct",tag:"direct"}]}' > "$T/landing.json"
 sing-box run -c "$T/landing.json" > "$T/landing.log" 2>&1 & pids+=("$!")
 V2RAY_API_LISTEN="127.0.0.1:$api_port"; V2RAY_PROTO_V2RAY="$T/stats.proto"; ensure_v2ray_api_proto_files
@@ -37,16 +39,31 @@ for mode in full partial warp; do
     warp)
       tag=warp
       rules=$(jq -nc --arg url "$url" '[{tag:"relay-test",file:"test.srs",url:$url}]')
-      projected=$(warp_config_project_json "$base" "$rules" true "$landing_port")
+      backend=$(jq -nc --argjson port "$landing_port" '{type:"socks",tag:"warp",server:"127.0.0.1",server_port:$port}')
+      projected=$(warp_config_project_json "$base" "$rules" "$backend")
       config=$(route_rebuild "$projected" '{"warp":{"mode":"rules","rules":[{"file":"test.srs"}]}}') ;;
   esac
-  echo "$config"|jq --arg api "$V2RAY_API_LISTEN" --arg tag "$tag" '.experimental.v2ray_api={listen:$api,stats:{enabled:true,outbounds:[$tag]}}' > "$T/config.json"
+  echo "$config"|jq --arg api "$V2RAY_API_LISTEN" --arg tag "$tag" '.experimental.v2ray_api={listen:$api,stats:{enabled:true,outbounds:[$tag,"direct"]}}' > "$T/config.json"
   sing-box check -c "$T/config.json"
   sing-box run -c "$T/config.json" > "$T/core.log" 2>&1 & core_pid=$!
   for ((n=0;n<40;n++)); do query_v2ray_api_uptime >/dev/null 2>&1 && break; sleep .25; done
   if ! curl -fsS --max-time 5 --noproxy '' --socks5 "127.0.0.1:$entry_port" --proxy-user "$auth:fixture" "http://127.0.0.1:$http_port/payload" -o "$T/result"; then cat "$T/core.log"; exit 1; fi
   [ "$(cat "$T/result")" = payload ]
   v2ray_api_query QueryStats '{"pattern":"outbound>>>","reset":false}' | jq -e --arg tag "$tag" '[.stat[]? | select(.name == ("outbound>>>"+$tag+">>>traffic>>>downlink")) | .value|tonumber]|add > 0' >/dev/null
+  if [ "$mode" = warp ]; then
+    warp_traffic() {
+      v2ray_api_query QueryStats '{"pattern":"outbound>>>warp>>>traffic>>>downlink","reset":false}' |
+        jq -er '.stat[0].value'
+    }
+    count="$(warp_traffic)"
+    curl -fsS --max-time 5 --noproxy '' --socks5 "127.0.0.1:$entry_port" \
+      --proxy-user "$auth:fixture" "http://127.0.0.1:$other_port/payload" -o "$T/other-result"
+    [ "$(cat "$T/other-result")" = payload ]
+    [ "$(warp_traffic)" = "$count" ]
+    v2ray_api_query QueryStats '{"pattern":"outbound>>>direct>>>traffic>>>downlink","reset":false}' |
+      jq -e '.stat[0].value|tonumber>0' >/dev/null
+    echo "PASS WARP rule match reaches WARP, unmatched traffic uses direct"
+  fi
   ! grep -q 'deprecated' "$T/core.log"
   kill "$core_pid"; wait "$core_pid" || true; core_pid=''
   echo "PASS $mode: real SOCKS forwarding and remote-rule download, no deprecation warning"

@@ -241,7 +241,7 @@ table_print_row() {
 # 协议注册表 — 所有协议定义的唯一权威来源
 # 新增协议：只需在此注册 + 写 builder + 写 exporter
 # ====================================================
-SUPPORTED_PROTOCOLS=(vless-reality anytls hysteria2 shadowsocks socks trojan vmess-ws vless-ws tuic)
+SUPPORTED_PROTOCOLS=(hysteria2 vless-reality anytls shadowsocks socks tuic trojan vmess-ws vless-ws)
 
 declare -A PROTO_PREFIX=(
   [vless-reality]=reality
@@ -343,15 +343,15 @@ def node_part($s):
 # 协议排序索引：将 tag/node_key 映射为排序序号（唯一定义）
 JQ_PROTOCOL_SORT='
 def protocol_sort_index($tag):
-  if ($tag | startswith("reality-")) then 0
-  elif ($tag | startswith("anytls-")) then 1
-  elif ($tag | startswith("hy2-")) then 2
+  if ($tag | startswith("hy2-")) then 0
+  elif ($tag | startswith("reality-")) then 1
+  elif ($tag | startswith("anytls-")) then 2
   elif ($tag | startswith("ss-")) then 3
   elif ($tag | startswith("socks-")) then 4
-  elif ($tag | startswith("trojan-")) then 5
-  elif ($tag | startswith("vmess-ws-")) then 6
-  elif ($tag | startswith("vless-ws-")) then 7
-  elif ($tag | startswith("tuic-")) then 8
+  elif ($tag | startswith("tuic-")) then 5
+  elif ($tag | startswith("trojan-")) then 6
+  elif ($tag | startswith("vmess-ws-")) then 7
+  elif ($tag | startswith("vless-ws-")) then 8
   else 99
   end;
 '

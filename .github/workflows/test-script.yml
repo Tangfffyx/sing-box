@@ -13,6 +13,10 @@ jobs:
       - uses: actions/checkout@v5
       - name: Ubuntu fixtures and generated script
         run: bash tests/check.sh
+      - name: Debian fixtures and generated script
+        run: |
+          docker run --rm -v "$PWD:/work:ro" -w /work debian:13-slim \
+            sh -c 'apt-get update -qq && apt-get install -y -qq bash jq python3 util-linux openssl curl >/dev/null && bash tests/check.sh'
       - name: Alpine fixtures and generated script
         run: |
           docker run --rm -v "$PWD:/work:ro" -w /work alpine:3.22 \
@@ -34,10 +38,12 @@ jobs:
       - name: Build core and statistics client
         run: |
           cd upstream
-          CGO_ENABLED=0 go build -tags with_v2ray_api,with_quic,with_utls -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
+          CGO_ENABLED=0 go build -tags with_v2ray_api,with_quic,with_utls,with_wireguard -o "$RUNNER_TEMP/sing-box" ./cmd/sing-box
           go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3
       - name: Real core loopback smoke test
         run: bash tests/core-smoke.sh "$RUNNER_TEMP/sing-box" "$(go env GOPATH)/bin/grpcurl"
+      - name: Generated script install, import, upgrade and rollback
+        run: bash tests/stage-i-loopback.sh "$RUNNER_TEMP/sing-box"
       - name: All nine protocols TCP/UDP and user permissions
         run: |
           export PATH="$RUNNER_TEMP:$PATH"

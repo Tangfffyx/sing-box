@@ -88,25 +88,25 @@ test_billing_periods() {
   config_load() { echo '{}'; }
   user_today_date() { echo "$fixture_today"; }
   user_db_load() { cat "$TEST_TMP/db.json"; }
-  user_manager_apply_changes() { echo "$1" > "$TEST_TMP/db.json"; }
+
   local fixture_today result
   fixture_today=2026-09-16
   echo '{"users":{"alice":{"enabled":false,"disabled_reason":"quota_exceeded","quota_gb":10,"used_up_bytes":100,"reset_day":15,"last_reset_period":"2026-08","expire_at":"0"}}}' > "$TEST_TMP/db.json"
-  _user_manager_reconcile_user_state_body
+  result="$(user_manager_evaluate_state "$(user_db_load)")"; echo "$result" > "$TEST_TMP/db.json"
   assert_json "$(user_db_load)" '.users.alice.used_up_bytes == 0 and .users.alice.enabled and .users.alice.last_reset_period == "2026-09"'
   result="$(user_db_load|jq '.users.alice.used_up_bytes=50')"; echo "$result" > "$TEST_TMP/db.json"
-  _user_manager_reconcile_user_state_body
+  result="$(user_manager_evaluate_state "$(user_db_load)")"; echo "$result" > "$TEST_TMP/db.json"
   assert_json "$(user_db_load)" '.users.alice.used_up_bytes == 50'
   fixture_today=2027-01-02
-  _user_manager_reconcile_user_state_body
+  result="$(user_manager_evaluate_state "$(user_db_load)")"; echo "$result" > "$TEST_TMP/db.json"
   assert_json "$(user_db_load)" '.users.alice.last_reset_period == "2026-12"'
   # New users establish a period instead of losing already accrued usage.
   result="$(user_db_load|jq '.users.alice.last_reset_period="" | .users.alice.used_up_bytes=75')"; echo "$result" > "$TEST_TMP/db.json"
-  _user_manager_reconcile_user_state_body
+  result="$(user_manager_evaluate_state "$(user_db_load)")"; echo "$result" > "$TEST_TMP/db.json"
   assert_json "$(user_db_load)" '.users.alice.used_up_bytes == 75'
   fixture_today=2028-03-01
-  result="$(user_db_load|jq '.users.alice.reset_day=32 | .users.alice.last_reset_period="2028-01" | .users.alice.disabled_reason="manual" | .users.alice.enabled=false')"; echo "$result" > "$TEST_TMP/db.json"
-  _user_manager_reconcile_user_state_body
+  result="$(user_db_load|jq '.users.alice.reset_day=32 | .users.alice.last_reset_period="2028-01" | .users.alice.disabled_reason="manual" | .users.alice.admin_allowed=false | .users.alice.enabled=false')"; echo "$result" > "$TEST_TMP/db.json"
+  result="$(user_manager_evaluate_state "$(user_db_load)")"; echo "$result" > "$TEST_TMP/db.json"
   assert_json "$(user_db_load)" '.users.alice.last_reset_period == "2028-02" and .users.alice.used_up_bytes == 0 and (.users.alice.enabled|not)'
 }
 
@@ -188,8 +188,12 @@ test_linux_lock_and_process() {
   INIT_SYSTEM=systemd
   systemctl() { echo "$$"; }
   local token
-  token="$(singbox_process_token)"
-  [[ "$token" == *":$$:"* ]]
+  if [ -r "/proc/$$/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
+    token="$(singbox_process_token)"
+    [[ "$token" == *":$$:"* ]]
+  else
+    echo 'SKIP Linux process token (requires /proc)'
+  fi
   nested() { with_manager_lock increment; }
   with_manager_lock nested
   [ "$(cat "$TEST_TMP/count")" = 13 ]
@@ -220,10 +224,10 @@ test_corrupt_json_backup() {
   printf '{broken' > "$USER_DB_FILE"
   config_load >/dev/null 2>&1
   meta_load >/dev/null 2>&1
-  user_db_load >/dev/null 2>&1
+  if user_db_load >/dev/null 2>&1; then return 1; fi
   [ "$(find "$dir" -maxdepth 1 -name 'config.json.corrupt.*' | wc -l)" -eq 1 ]
   [ "$(find "$dir" -maxdepth 1 -name 'meta.json.corrupt.*' | wc -l)" -eq 1 ]
-  [ "$(find "$dir" -maxdepth 1 -name 'users.json.corrupt.*' | wc -l)" -eq 1 ]
+  [ "$(cat "$USER_DB_FILE")" = '{broken' ]
   atomic_write_json_file "$META_FILE" '{"ok":true}' "test"
   assert_json "$(cat "$META_FILE")" '.ok == true'
   if atomic_write_json_file "$META_FILE" '{invalid' "test" 2>/dev/null; then return 1; fi

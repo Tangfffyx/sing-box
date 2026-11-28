@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "py"))
@@ -69,10 +70,52 @@ class TestTgCenterBot(unittest.TestCase):
         with open(self.cfg_path, "r", encoding="utf-8") as f:
             self.assertEqual(json.load(f), payload)
 
+    def post(self, path, payload):
+        body = json.dumps(payload).encode()
+        handler = DummyHandler({"X-SB-TG-Secret": "secret", "Content-Length": str(len(body))}, body)
+        handler.path = path
+        with patch.object(self.bot, "write_json") as reply:
+            self.bot.Handler.do_POST(handler)
+        return reply.call_args.args[1:]
+
+    def test_notify_reaches_configured_admin(self):
+        self.bot.save_config({"access_secret": "secret", "admin_chat_ids": ["123"]})
+        with patch.object(self.bot, "send_message", return_value={"ok": True}) as send:
+            status, payload = self.post("/api/test", {"vps_name": "第二台"})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        send.assert_called_once_with("123", "通知测试成功：第二台")
+
+    def test_bind_scope_and_expiration(self):
+        self.bot.save_config({"access_secret": "secret", "bot_username": "fixture_bot"})
+        alice = {"vps_id": "n1", "vps_name": "首台", "username": "alice"}
+        bob = {"vps_id": "n2", "vps_name": "第二台", "username": "bob"}
+        with patch.object(self.bot.time, "time", return_value=1000):
+            status, reply = self.post("/api/bind-token", alice)
+            self.assertEqual(status, 200)
+            token = reply["link"].split("start=bind_")[1]
+            _, reply = self.post("/api/bind-token", bob)
+            expired = reply["link"].split("start=bind_")[1]
+        with patch.object(self.bot, "send_home"), patch.object(self.bot, "send_message") as send:
+            with patch.object(self.bot.time, "time", return_value=1599):
+                self.bot.handle_message({"text": f"/start bind_{token}", "chat": {"id": 101}, "from": {"id": 101}})
+                self.bot.bind_token(202, 202, token)
+            with patch.object(self.bot.time, "time", return_value=1600):
+                self.bot.bind_token(202, 202, expired)
+            self.assertEqual(send.call_count, 3)
+            self.assertIn("已失效", send.call_args.args[1])
+        cfg = self.bot.load_config()
+        self.assertEqual([item["username"] for item in self.bot.user_bindings(cfg, 101)], ["alice"])
+        self.assertEqual(self.bot.user_bindings(cfg, 202), [])
+        with patch.object(self.bot, "render_page") as render:
+            self.bot.user_status(101, 101)
+            self.assertIn("alice", render.call_args.args[1])
+            self.assertNotIn("bob", render.call_args.args[1])
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestTgCenterBot)
     res = unittest.TextTestRunner(verbosity=0).run(suite)
     if not res.wasSuccessful():
         sys.exit(1)
-    print("PASS py/tg_center_bot.py unit tests (auth, payload bounds, corrupt backup, atomic save)")
+    print("PASS py/tg_center_bot.py unit tests (auth, payload limits, atomic save, admin test, binding scope and expiry)")

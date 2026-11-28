@@ -11,5 +11,6 @@ config_load() {
 }
 result=$(export_configs)
 link=$(printf '%s\n' "$result"|sed -n 's/.*通用链接: ss:\/\/\([^@]*\)@.*/\1/p')
-[ "$(printf '%s' "$link"|openssl base64 -d -A)" = "2022-blake3-aes-128-gcm:$key:$key" ]
+expected="2022-blake3-aes-128-gcm:$(url_encode "$key:$key")"
+[ "$link" = "$expected" ]
 echo 'PASS SS2022 equal server/user keys export both password components'

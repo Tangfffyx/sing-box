@@ -6,7 +6,7 @@
 #       50_v2ray_api.sh, 60_user_db.sh
 # ============================================================
 
-user_manager_apply_to_json() {
+user_manager_prepare_credentials() {
   local json="$1" db_json="$2" meta_json="${3:-}"
   local work_json="$json"
   local inv_lines=() line idx entry_key proto port inbound
@@ -18,7 +18,7 @@ user_manager_apply_to_json() {
     [ -n "$inbound" ] || continue
 
     # Plan credentials in one jq pass; only new credentials need external generators.
-    local plan users_json missing desired new_obj
+    local plan users_json desired new_obj
     plan="$(echo "$inbound" | jq -c --argjson db "$db_json" --arg entry "$entry_key" --arg proto "$proto" "${JQ_NODE_PART}"'
       def business($n): if ($n|contains("@")) then ($n|split("@")[1]) else "admin" end;
       . as $ib
@@ -26,11 +26,11 @@ user_manager_apply_to_json() {
          | select(contains("-to-") and . != $entry)] | unique as $relays
       | def allowed($node):
           $db.users | to_entries[] | select(.key != "admin")
-          | select($proto != "socks" or .value.enabled == true)
           | select(.value.allow_all_nodes == true or ((.value.nodes // []) | index($node)) != null)
           | $node + "@" + .key;
-      [if $proto != "socks" or $db.users.admin.enabled == true then $entry else empty end,
-       allowed($entry), ($relays[] | . as $node | $node, allowed($node))] as $desired
+      ([ $entry, allowed($entry), ($relays[] | . as $node | $node, allowed($node)),
+         ($ib.users[]? | (.name // .username) as $name | select($db.users[business($name)] != null) | $name) ]
+       | reduce .[] as $name ([]; if index($name) == null then . + [$name] else . end)) as $desired
       | (reduce ($ib.users // [])[] as $u ({}; .[$u.name // $u.username] //= $u)) as $existing
       | [$desired[] | . as $name
           | ($existing[$name] // (if $proto == "socks" and node_part($name) == $entry then
@@ -53,36 +53,67 @@ user_manager_apply_to_json() {
     work_json="$(echo "$work_json" | jq --argjson idx "$idx" --argjson users "$users_json" '.inbounds[$idx].users = $users')" || return 1
   done
 
-  if [ -n "$meta_json" ]; then
-    work_json="$(route_rebuild "$work_json" "$meta_json")" || return 1
-  else
-    work_json="$(route_rebuild "$work_json")" || return 1
-  fi
-  work_json="$(filter_disabled_auth_users "$work_json" "$db_json")" || return 1
-  ensure_v2ray_api_on_json "$work_json" || return 1
+  printf '%s\n' "$work_json"
 }
 
-filter_disabled_auth_users() {
-  local json="$1" db_json="$2"
-  local enabled_json
-  enabled_json="$(echo "$db_json" | jq -c '[.users | to_entries[] | select(.value.enabled == true) | .key]')"
-  echo "$json" | jq "${JQ_AUTH_USERS}"'
-    def user_enabled($u):
-      if ($u | contains("@")) then ($enabled | index(($u | split("@")[1]))) != null
-      else ($enabled | index("admin")) != null
-      end;
+# The archive contains configured credentials, including those absent from the runtime.
+# A missing active inbound is only restored when it was explicitly parked.
+user_manager_inventory_config() {
+  local runtime="$1" db="$2"
+  jq --argjson db "$db" '
+    (.inbounds // []) as $active
+    | ($db.meta.managed_inbounds // {}) as $saved
+    | .inbounds = (
+        [$active[] | . as $inbound
+          | if $saved[$inbound.tag] == null then . else
+              .users = ([.users[]?, $saved[$inbound.tag].users[]?] |
+                reduce .[] as $user ([]; if any(.[]; (.name // .username) == ($user.name // $user.username))
+                  then . else . + [$user] end))
+            end]
+        + [$db.meta.parked_inbounds[]? as $tag
+            | select(all($active[]; .tag != $tag)) | $saved[$tag] | select(. != null)])
+  ' <<< "$runtime"
+}
 
-    .route.rules |= map(
-      if (.auth_user? == null) then .
-      else
-        (auth_users_array | map(select(user_enabled(.)))) as $remain
-        | if ($remain | length) == 0 then empty
-          elif ($remain | length) == 1 then .auth_user = $remain[0]
-          else .auth_user = $remain
-          end
-      end
-    )
-  ' --argjson enabled "$enabled_json"
+user_manager_config_for_edit() {
+  local runtime db
+  runtime="$(config_load)" || return 1
+  if user_db_exists; then
+    db="$(user_db_load)" || return 1
+    user_manager_inventory_config "$runtime" "$db"
+  elif user_db_is_first_use; then
+    printf '%s\n' "$runtime"
+  else
+    user_db_restore_hint
+    return 1
+  fi
+}
+
+user_manager_project_runtime() {
+  local canonical="$1" db="$2" meta="${3:-}" routed
+  routed="$(route_rebuild "$canonical" "$meta")" || return 1
+  routed="$(jq --argjson db "$db" "${JQ_DETECT_PROTOCOL}${JQ_NODE_PART}"'
+    .inbounds |= map(
+      if detect_protocol == "" then . else
+        .tag as $entry
+        | .users |= map(
+          (.name // .username) as $auth
+          | ($auth | node_part(.) | if contains("-to-") then . else $entry end) as $node
+          | (if ($auth|contains("@")) then ($auth|split("@")[1]) else "admin" end) as $account
+          | $db.users[$account] as $user
+          | select($user.enabled == true and
+              ($account == "admin" or $user.allow_all_nodes == true or (($user.nodes // []) | index($node)) != null)))
+        | select((.users | length) > 0)
+      end)
+  ' <<< "$routed")" || return 1
+  ensure_v2ray_api_on_json "$routed"
+}
+
+user_manager_apply_to_json() {
+  local canonical db
+  db="$(user_manager_evaluate_state "$2")" || return 1
+  canonical="$(user_manager_prepare_credentials "$1" "$db")" || return 1
+  user_manager_project_runtime "$canonical" "$db" "${3:-}"
 }
 
 # 菜单传入前后快照用于提取字段补丁；在锁内将补丁合并到最新数据。
@@ -90,7 +121,7 @@ filter_disabled_auth_users() {
 merge_user_edit() {
   local current="$1" before="$2" after="$3" mode="${4:-edit}" target="${5:-}"
   printf '%s' "$current" | jq --argjson before "$before" --argjson after "$after" --arg mode "$mode" --arg target "$target" '
-    def policy: del(.used_up_bytes,.used_down_bytes,.last_live_up_bytes,.last_live_down_bytes,.manual_added_bytes);
+    def policy: del(.used_up_bytes,.used_down_bytes,.last_live_up_bytes,.last_live_down_bytes,.manual_added_bytes,.enabled,.disabled_reason,.last_reset_period);
     reduce ((($before.users|keys) + ($after.users|keys)) | unique[]) as $u (. ;
       ($before.users[$u]) as $old | ($after.users[$u]) as $new
       | if $old == null then
@@ -100,7 +131,7 @@ merge_user_edit() {
           elif ((.users[$u]|policy) != ($old|policy)) then error("用户状态已变化，请重新确认删除: " + $u)
           else del(.users[$u]) end
         else
-          ([$new|keys[] | select(. != "used_up_bytes" and . != "used_down_bytes" and . != "last_live_up_bytes" and . != "last_live_down_bytes")
+          ([$new|keys[] | select(. != "used_up_bytes" and . != "used_down_bytes" and . != "last_live_up_bytes" and . != "last_live_down_bytes" and . != "enabled" and . != "disabled_reason")
             | . as $f | select($new[$f] != $old[$f])]) as $fields
           | if ($fields|length) == 0 and ($u != $target or $mode != "reset") then .
             elif .users[$u] == null then error("用户已被删除: " + $u)
@@ -125,9 +156,10 @@ user_manager_commit_edit() {
 }
 
 _user_manager_commit_edit_body() {
-  local before="$1" after="$2" mode="${3:-edit}" target="${4:-}" merged
-  sync_user_usage_counters || return 1
-  merged="$(merge_user_edit "$(user_db_load)" "$before" "$after" "$mode" "$target")" || {
+  local before="$1" after="$2" mode="${3:-edit}" target="${4:-}" merged current _USER_SAMPLE_FAILED
+  user_manager_sample_before_change
+  current="$(user_db_load)" || return 1
+  merged="$(merge_user_edit "$current" "$before" "$after" "$mode" "$target")" || {
     err "数据已变化或输入无效，请重新打开菜单后操作。"
     return 1
   }
@@ -139,99 +171,66 @@ user_manager_apply_changes() {
 }
 
 _user_manager_apply_changes_body() {
-  local db_json="$1" base_json="${2:-}" meta_json="${3:-}"
+  local db_json="$1" base_json="${2:-}" meta_json="${3:-}" canonical applied_json runtime
+  local _USER_SAMPLE_FAILED="${_USER_SAMPLE_FAILED:-0}"
   if [ "${_USER_KEEP_LATEST_DB:-0}" = "1" ]; then
-    sync_user_usage_counters || return 1
-    db_json="$(user_db_load)"
+    user_manager_sample_before_change
+    db_json="$(user_db_load)" || return 1
+  else
+    [ -n "$base_json" ] || base_json="$(config_load)" || return 1
+    base_json="$(user_manager_inventory_config "$base_json" "$db_json")" || return 1
   fi
-  [ -n "$base_json" ] || base_json="$(config_load)"
-
+  db_json="$(user_manager_evaluate_state "$db_json")" || return 1
   db_json="$(user_db_cleanup_missing_nodes "$db_json" "$base_json")" || return 1
-
-  local applied_json
-  applied_json="$(user_manager_apply_to_json "$base_json" "$db_json" "$meta_json")" || {
-    err "生成用户节点关系失败。"
-    return 1
-  }
-
-  local old_db_json="" had_db=0
-  if user_db_exists; then
-    old_db_json="$(user_db_load)"
-    had_db=1
+  canonical="$(user_manager_prepare_credentials "$base_json" "$db_json")" || return 1
+  applied_json="$(user_manager_project_runtime "$canonical" "$db_json" "$meta_json")" || return 1
+  db_json="$(jq --argjson canonical "$canonical" --argjson runtime "$applied_json" "${JQ_DETECT_PROTOCOL}"'
+    ($runtime.inbounds | map(.tag)) as $live
+    | .meta.managed_inbounds = ($canonical.inbounds | map(select(detect_protocol != ""))
+        | map({key:.tag,value:.}) | from_entries)
+    | .meta.parked_inbounds = [.meta.managed_inbounds | keys[] | . as $tag | select(($live | index($tag)) == null)]
+  ' <<< "$db_json")" || return 1
+  runtime="$(config_load)" || return 1
+  if [ "${_USER_SAMPLE_FAILED:-0}" = 1 ] &&
+    [ "$(jq -Sc . <<< "$applied_json")" != "$(jq -Sc . <<< "$runtime")" ]; then
+    warn "最后一次流量采样失败。权限会照常更新，重启前的用量可能有缺口。"
+    db_json="$(jq --arg observed "$(TZ="$BUSINESS_TZ" date '+%F %T')" '
+      .meta.last_usage_gap_at_text = $observed
+    ' <<< "$db_json")" || return 1
   fi
-  # 抓 old_config 用于 meta_save 失败时回滚（即使调用方没传 meta_json 也无害——下面只在传了时才用）
-  local old_config_json
-  old_config_json="$(config_load 2>/dev/null)" || old_config_json='{}'
-
-  user_db_save "$db_json" || {
-    err "用户数据库保存失败，已阻止配置变更。"
-    return 1
-  }
-
-  if ! _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json"; then
-    # config 失败，回滚 user_db
-    if [ "$had_db" = "1" ]; then
-      user_db_save "$old_db_json" || warn "配置应用失败，且用户数据库回滚失败，请手动检查：$USER_DB_FILE"
-    else
-      rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "配置应用失败，且用户数据库清理失败，请手动检查：$USER_DB_FILE"
+  if [ -z "$meta_json" ] && [ "$(jq -Sc . <<< "$applied_json")" = "$(jq -Sc . <<< "$runtime")" ]; then
+    if [ "$(jq -Sc . <<< "$db_json")" != "$(jq -Sc . "$USER_DB_FILE")" ]; then
+      user_db_save "$db_json" || return 1
     fi
-    return 1
+    return 0
   fi
 
-  # config 已成功，提交 meta（如果调用方传了 meta_json）
-  if [ -n "$meta_json" ]; then
-    if ! meta_save "$meta_json"; then
-      err "元数据保存失败，正在回滚配置和用户数据库..."
-      _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_apply "$old_config_json" \
-        || err "回滚配置失败，请手动检查 $CONFIG_FILE"
-      if [ "$had_db" = "1" ]; then
-        user_db_save "$old_db_json" || warn "用户数据库回滚失败，请手动检查 $USER_DB_FILE"
-      else
-        rm -f "$USER_DB_FILE" >/dev/null 2>&1 || warn "用户数据库清理失败：$USER_DB_FILE"
-      fi
-      return 1
-    fi
+  user_db_exists || { user_db_restore_hint; return 1; }
+  manager_transaction_begin || { err "无法备份本次变更涉及的数据。"; return 1; }
+  if ! user_db_save "$db_json" ||
+    ! _CONFIG_APPLY_QUIET_OK=1 config_apply_no_usage_sync "$applied_json" ||
+    { [ -n "$meta_json" ] && ! meta_save "$meta_json"; }; then
+    err "用户变更写入失败。"
+    manager_recover_pending || return 1
+    return 1
   fi
+  manager_transaction_end || { err "提交未完成，下次操作时将恢复旧数据。"; return 1; }
 
   [ "${_USER_MANAGER_APPLY_QUIET_OK:-0}" = "1" ] || ok "用户变更已应用。"
   return 0
 }
 
-user_manager_runtime_sync() {
-  local db_json current_json desired_json current_norm desired_norm
-  db_json="$(user_db_load)"
-  if [ ! -s "$USER_DB_FILE" ]; then
-    user_db_save "$db_json" || return 1
+user_manager_sample_before_change() {
+  _USER_SAMPLE_FAILED=0
+  if ! sync_user_usage_counters; then
+    _USER_SAMPLE_FAILED=1
   fi
-
-  current_json="$(config_load)"
-  desired_json="$(user_manager_apply_to_json "$current_json" "$db_json")" || {
-    err "生成用户流量统计配置失败。"
-    return 1
-  }
-
-  current_norm="$(echo "$current_json" | jq -S .)"
-  desired_norm="$(echo "$desired_json" | jq -S .)"
-  if [ "$current_norm" != "$desired_norm" ]; then
-    if _CONFIG_APPLY_QUIET_OK=1 config_apply "$desired_json"; then
-      ok "配置已同步。"
-    else
-      err "配置同步失败。"
-      return 1
-    fi
-  fi
-
-  return 0
 }
 
 # ---------- 自动控制（到期/超额/重置） ----------
 
 user_today_date() {
   TZ="${BUSINESS_TZ:-Asia/Shanghai}" date +%F
-}
-
-user_current_period() {
-  TZ="${BUSINESS_TZ:-Asia/Shanghai}" date +%Y-%m
 }
 
 user_manager_reconcile_user_state() {
@@ -241,11 +240,14 @@ user_manager_reconcile_user_state() {
 _user_manager_reconcile_user_state_body() {
   init_manager_env || return 1
   user_db_exists || return 0
-  sync_user_usage_counters || return 1
+  local _USER_SAMPLE_FAILED db_json
+  user_manager_sample_before_change
+  db_json="$(user_db_load)" || return 1
+  _user_manager_apply_changes_body "$db_json"
+}
 
-  local db_json json today period today_day last_day result changed
-  db_json="$(user_db_load)"
-  json="$(config_load)"
+user_manager_evaluate_state() {
+  local db_json="$1" today period today_day last_day
   # 单一时间真理源：所有派生字段都从 today 字符串切片，避免连续调多次 date 在毫秒级跨日导致字段错位
   today="$(user_today_date)"
   period="${today:0:7}"
@@ -256,7 +258,7 @@ _user_manager_reconcile_user_state_body() {
     print d[m+0]
   }')
 
-  result="$(echo "$db_json" | jq --arg today "$today" --arg period "$period" --argjson today_day "$today_day" --argjson last_day "$last_day" '
+  echo "$db_json" | jq --arg today "$today" --arg period "$period" --argjson today_day "$today_day" --argjson last_day "$last_day" '
     .users |= with_entries(
       .value as $v
       | ($v.expire_at // "0") as $expire
@@ -280,43 +282,26 @@ _user_manager_reconcile_user_state_body() {
       | if ($effective_reset_day > 0 and $last_reset == "") then
           .value.last_reset_period = $due_period
         else . end
-      # 1. 到期检查：expire_at 为到期停用日，当天即禁用
-      | if $expired then
-          .value.enabled = false
-          | if ($reason == "manual") then
-              .value.disabled_reason = "manual"
-            else
-              .value.disabled_reason = "expired"
-            end
-        end
-      # 2. 重置检查
-      | if (($expired | not) and $effective_reset_day > 0 and $last_reset != "" and $last_reset < $due_period) then
+      | if ($effective_reset_day > 0 and $last_reset != "" and $last_reset < $due_period) then
           .value.used_up_bytes = 0
           | .value.used_down_bytes = 0
           | .value.manual_added_bytes = 0
           | .value.last_reset_period = $due_period
-          | if ((.value.disabled_reason // null) == "quota_exceeded") then
-              .value.enabled = true
-              | .value.disabled_reason = null
-            else . end
         else . end
-      # 3. 超额检查（重置后 billable 已清零，不会误判）
-      | if ($quota > 0 and .value.enabled == true) then
-          ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $current_billable
-          | if ($current_billable >= ($quota * 1073741824)) then
-              .value.enabled = false
-              | .value.disabled_reason = "quota_exceeded"
-            else . end
-        else . end
+      | .value.admin_allowed = (
+          if ($v | has("admin_allowed")) then $v.admin_allowed == true
+          elif $reason == "manual" then false
+          else ($v.enabled == true or $reason == "expired" or $reason == "quota" or $reason == "quota_exceeded") end)
+      | ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $used
+      | .value.disabled_reason = (
+          if (.value.admin_allowed | not) then
+            if $reason == "manual" then "manual" else "needs_review" end
+          elif $expired then "expired"
+          elif ($quota > 0 and $used >= ($quota * 1073741824)) then "quota_exceeded"
+          else null end)
+      | .value.enabled = (.value.disabled_reason == null)
     )
-  ')" || return 1
-
-  changed="$(jq -n --argjson old "$db_json" --argjson new "$result" 'if ($old == $new) then "0" else "1" end' | tr -d '"')"
-
-  if [ "$changed" = "1" ]; then
-    user_manager_apply_changes "$result" "$json" >/dev/null 2>&1 || return 1
-  fi
-  return 0
+  '
 }
 
 apply_automatic_user_controls() {
@@ -326,7 +311,7 @@ apply_automatic_user_controls() {
 user_watch_run() {
   # cron 场景下用 flock 排他锁，避免与交互式操作并发修改文件
   local lock_fd
-  user_db_exists || return 0
+  [ -d "$USER_DB_FILE.pending" ] || user_db_exists || { user_db_is_first_use || user_db_restore_hint; return 0; }
   mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null || true
   if ! has_cmd flock || ! { exec {lock_fd}>"$SB_LOCK_FILE"; } 2>/dev/null; then
     err "无法获取管理锁，本轮后台同步已跳过。"
@@ -335,9 +320,8 @@ user_watch_run() {
   flock -n "$lock_fd" || { exec {lock_fd}>&-; return 0; }
   # 设置哨兵告知嵌套的 config_apply 已持锁，避免重入死锁
   _CONFIG_LOCK_HELD=1
-  if user_manager_background_sync >/dev/null 2>&1; then
-    apply_automatic_user_controls >/dev/null 2>&1 || true
-    user_db_touch_data_updated_at >/dev/null 2>&1 || true
+  if manager_recover_pending; then
+    apply_automatic_user_controls >/dev/null || true
   fi
   _CONFIG_LOCK_HELD=0
   exec {lock_fd}>&-
@@ -345,20 +329,9 @@ user_watch_run() {
 
 ensure_user_manager_ready() {
   init_manager_env || return 1
-  if ! user_db_exists; then
-    user_db_save "$(user_db_min_template)" || {
-      err "用户数据库初始化失败：$USER_DB_FILE"
-      return 1
-    }
-    ok "已初始化用户数据库，默认启用 admin 用户。"
-  fi
-  return 0
+  user_db_initialize
 }
 
 user_manager_background_sync() {
-  user_db_exists || return 0
-  init_manager_env || return 1
-  user_db_cleanup_current_and_save || return 1
-  user_manager_runtime_sync || return 1
-  return 0
+  user_manager_reconcile_user_state
 }

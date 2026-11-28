@@ -471,7 +471,7 @@ route_rebuild(){
       ] | unique
     ' 2>/dev/null || echo '[]')"
   fi
-  if ! echo "$normalized" | jq -e '.outbounds[]? | select((.tag // "") == "warp")' >/dev/null 2>&1; then
+  if ! echo "$normalized" | jq -e '(.outbounds[]?, .endpoints[]?) | select(.tag == "warp")' >/dev/null 2>&1; then
     warp_mode="off"
     warp_tags_json='[]'
   fi
@@ -532,7 +532,7 @@ route_rebuild(){
 
   core_auth_users_json="$(echo "$normalized" | jq -c "${JQ_NODE_PART}"'
     [.inbounds[]? | .tag as $entry | .users[]? | (.name // .username // "")
-      | select(. != "" and node_part(.) == $entry)] | unique
+      | select(. != "" and (node_part(.) | contains("-to-") | not))] | unique
   ')" || return 1
   relay_pairs_json="$(relay_list_table "$normalized" | jq -Rsc --argjson config "$normalized" '
     [$config.outbounds[]?.tag] as $tags
@@ -543,7 +543,11 @@ route_rebuild(){
 
   preserved_rules_json="$(
     echo "$normalized" | jq -c '
-      [ .route.rules[]? | select(.auth_user? == null and .inbound? == null and . != {action:"reject"}) ]
+      [ .route.rules[]? | select(. != {action:"reject"})
+        | select(.auth_user? == null or .inbound? != null or
+            ((keys - ["auth_user","rule_set","outbound","action"]) | length > 0) or
+            ((.action // "route") != "route") or
+            ((.outbound // "") | test("^(direct$|warp$|out-|to-|relay-)") | not)) ]
     '
   )" || return 1
 

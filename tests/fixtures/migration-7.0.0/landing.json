@@ -1,0 +1,22 @@
+{
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-11081",
+      "listen": "127.0.0.1",
+      "listen_port": 11081,
+      "users": [
+        {
+          "username": "lab",
+          "password": "fixture-landing"
+        }
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}

@@ -8,7 +8,7 @@
 # ---------- Proto 文件管理 ----------
 
 ensure_v2ray_api_proto_files() {
-  mkdir -p /etc/sing-box
+  mkdir -p "$(dirname "$V2RAY_PROTO_V2RAY")" || return 1
   cat > "$V2RAY_PROTO_V2RAY" <<'EOF_V2V'
 syntax = "proto3";
 package v2ray.core.app.stats.command;
@@ -81,15 +81,7 @@ ensure_grpcurl_logged() {
 ensure_v2ray_api_on_json() {
   local json="$1"
   local users_json
-  users_json="$(
-    echo "$json" | jq -c "${JQ_AUTH_USERS}"'
-      [
-        .route.rules[]?
-        | auth_users_array[]?
-        | select(length > 0)
-      ] | unique | sort
-    '
-  )"
+  users_json="$(jq -c '[.inbounds[]?.users[]? | (.name // .username // empty) | select(length > 0)] | unique' <<< "$json")" || return 1
   echo "$json" | jq --arg listen "$V2RAY_API_LISTEN" --argjson users "$users_json" '
     .experimental = (.experimental // {})
     | .experimental.v2ray_api = (.experimental.v2ray_api // {})
@@ -151,25 +143,36 @@ account_usage_snapshot() {
           | .[$m.user][$m.dir] = ($s.value|tonumber))) as $live
     | (reduce ($live|to_entries[]) as $item ({};
         business($item.key) as $u
-        | ($item.value.uplink // 0) as $up | ($item.value.downlink // 0) as $down
         | (if $new_epoch then {} else ($prev.counters[$item.key] // {}) end) as $old
+        | ($item.value.uplink // $old.uplink // 0) as $up
+        | ($item.value.downlink // $old.downlink // 0) as $down
         | .[$u].up = ((.[$u].up // 0) + delta($up; ($old.uplink // 0)))
         | .[$u].down = ((.[$u].down // 0) + delta($down; ($old.downlink // 0)))
         | .[$u].live_up = ((.[$u].live_up // 0) + $up)
-        | .[$u].live_down = ((.[$u].live_down // 0) + $down))) as $usage
+        | .[$u].live_down = ((.[$u].live_down // 0) + $down)
+        | .[$u].seen_up = ((.[$u].seen_up // false) or ($item.value | has("uplink")))
+        | .[$u].seen_down = ((.[$u].seen_down // false) or ($item.value | has("downlink"))))) as $usage
+    | (if $prev.process == null then
+         .users | with_entries(.value |= {up:(.last_live_up_bytes // 0), down:(.last_live_down_bytes // 0)})
+       elif $new_epoch then {} else ($prev.legacy_pending // {}) end) as $legacy
     | .users |= with_entries(
         .key as $u | .value as $v | ($usage[$u] // {}) as $n
-        # 首次从旧版迁移：沿用旧聚合基线结算一次，然后保存节点基线。
+        | ($legacy[$u] // {}) as $baseline
         | .value.used_up_bytes = (($v.used_up_bytes // 0) +
-            (if $prev.process == null then delta(($n.live_up // 0); ($v.last_live_up_bytes // 0)) else ($n.up // 0) end))
+            (if $baseline.up != null and $n.seen_up then delta($n.live_up; $baseline.up) else ($n.up // 0) end))
         | .value.used_down_bytes = (($v.used_down_bytes // 0) +
-            (if $prev.process == null then delta(($n.live_down // 0); ($v.last_live_down_bytes // 0)) else ($n.down // 0) end))
-        | .value.last_live_up_bytes = ($n.live_up // 0)
-        | .value.last_live_down_bytes = ($n.live_down // 0))
+            (if $baseline.down != null and $n.seen_down then delta($n.live_down; $baseline.down) else ($n.down // 0) end))
+        | .value.last_live_up_bytes = ($n.live_up // (if $new_epoch then 0 else ($v.last_live_up_bytes // 0) end))
+        | .value.last_live_down_bytes = ($n.live_down // (if $new_epoch then 0 else ($v.last_live_down_bytes // 0) end)))
     | .meta.usage = {
         process:$snap.process,
         start:(if $new_epoch then $snap.start else $prev.start end),
-        counters:((if $new_epoch then {} else ($prev.counters // {}) end) * $live)
+        counters:((if $new_epoch then {} else ($prev.counters // {}) end) * $live),
+        legacy_pending:($legacy | with_entries(
+          .key as $u | $usage[$u] as $n
+          | if $n.seen_up then del(.value.up) else . end
+          | if $n.seen_down then del(.value.down) else . end
+          | select(.value | length > 0)))
       }
   '
 }
@@ -185,7 +188,11 @@ _sync_user_usage_counters_body() {
   jq -e '.experimental.v2ray_api.stats.enabled == true' "$CONFIG_FILE" >/dev/null 2>&1 || return 0
   local snapshot db_json
   snapshot="$(query_usage_snapshot)" || { warn "流量采样失败，本次保持原统计数据不变。"; return 1; }
-  db_json="$(account_usage_snapshot "$(user_db_load)" "$snapshot")" || return 1
+  db_json="$(user_db_load)" || return 1
+  db_json="$(account_usage_snapshot "$db_json" "$snapshot")" || return 1
+  db_json="$(jq --arg sampled "$(TZ="$BUSINESS_TZ" date '+%F %T')" '
+    .meta.data_updated_at_text = $sampled
+  ' <<< "$db_json")" || return 1
   user_db_save "$db_json" || { warn "流量数据保存失败：$USER_DB_FILE"; return 1; }
 }
 

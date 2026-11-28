@@ -11,6 +11,7 @@ user_package_invalid_return() {
 
 show_user_status_table() {
   local db_json="$1"
+  local numbered="${2:-0}" row_number=0
   local sep=$'\t'
   local header widths_line row_line
   local -a rows=()
@@ -29,7 +30,8 @@ show_user_status_table() {
       | (.value.enabled == true) as $en
       | (.value.disabled_reason // "") as $reason
       | (if $en then "正常"
-         elif $reason == "quota" then "超流量"
+         elif $reason == "quota" or $reason == "quota_exceeded" then "已达上限"
+         elif $reason == "needs_review" then "停用待核对"
          elif $reason == "expired" then "已过期"
          else "已停用" end) as $st
       | ((.value.used_up_bytes // 0) + (.value.used_down_bytes // 0) + (.value.manual_added_bytes // 0)) as $used
@@ -46,7 +48,7 @@ show_user_status_table() {
           local used_txt usage_col bar_col pct
           used_txt="$(format_bytes_human "$c_used")"
           if [ "${c_qgb:-0}" -gt 0 ] 2>/dev/null; then
-            usage_col="${used_txt} / ${c_qgb}GB"
+            usage_col="${used_txt} / ${c_qgb} GiB"
             pct="$(awk -v u="$c_used" -v q="$c_qgb" 'BEGIN {
               p = (u * 100.0) / (q * 1073741824.0);
               if (p < 0) p = 0;
@@ -57,6 +59,10 @@ show_user_status_table() {
           else
             usage_col="${used_txt} / 不限"
             bar_col="—"
+          fi
+          if [ "$numbered" = 1 ]; then
+            row_number=$((row_number + 1))
+            c_name="$row_number. $c_name"
           fi
           printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$c_name" "$c_status" "$usage_col" "$bar_col" "$c_reset" "$c_expire"
@@ -103,6 +109,8 @@ show_user_detail_card() {
     "$C" "$(format_bytes_human "$down")" "$NC" \
     "$C" "$(format_bytes_human "$manual")" "$NC" \
     "$W" "$(format_bytes_human "$total")" "$NC"
+  printf '  上次成功采样 %s\n' "$(jq -r '.meta.data_updated_at_text | if . == null or . == "" then "尚无记录" else . end' <<< "$db_json")"
+  jq -r '.meta.last_usage_gap_at_text // empty | "  上次可能缺计的时间 " + .' <<< "$db_json"
 }
 
 prompt_reset_day() {
@@ -201,9 +209,9 @@ show_user_allowed_nodes() {
 
 user_add_menu() {
   local db_json json username quota reset_day expire_at ans nodes_json allow_all_json before_db
-  db_json="$(user_db_load)"
+  db_json="$(user_db_load)" || return 1
   before_db="$db_json"
-  json="$(config_load)"
+  json="$(user_manager_config_for_edit)" || return 1
   clear
   print_rect_title "新增用户"
   show_user_status_table "$db_json"
@@ -220,7 +228,7 @@ user_add_menu() {
     return 1
   fi
   ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
-  read -r -p "请输入流量限制（GB，输入 0 表示不限，回车返回）: " quota
+  read -r -p "请输入流量限制（GiB，输入 0 表示不限，回车返回）: " quota
   [[ "$quota" =~ ^[0-9]+$ ]] || { warn "输入无效，未作修改，已返回上一级。"; pause; return 0; }
   prompt_reset_day reset_day
   if ! prompt_expire_date expire_at; then pause; return 0; fi
@@ -341,9 +349,9 @@ user_manage_package_menu() {
     '
   )
 
-  ui_echo "当前流量限制：${current_quota} GB"
+  ui_echo "当前流量限制：${current_quota} GiB"
   ui_echo "${Y}折算成单向流量填入。示例：双向800G流量就填写400，单向500G流量就填写500${NC}"
-  ui_echo "单位为 GB ，输入 0 表示不限"
+  ui_echo "单位为 GiB ，输入 0 表示不限"
   ui_echo "回车：保持当前值"
   read -r -p "请输入: " quota_in
   if [ -z "$quota_in" ]; then
@@ -423,7 +431,7 @@ user_reset_usage_menu() {
   print_rect_title "手动重置流量" >&2
   show_user_status_table "$db_json" >&2
   ui_echo "将清零该用户的上传流量、下载流量和手动补正流量。"
-  ui_echo "此操作不会修改用户的启用状态、套餐设置、到期时间或重置日。"
+  ui_echo "已达额度的账号在清零后会按原授权恢复。手动停用和到期仍然有效。"
   local ans
   ask_confirm_yes "输入 yes 确认清零该用户流量（回车取消）: " || return 1
   echo "$db_json" | jq --arg u "$username" '
@@ -547,9 +555,9 @@ user_manage_single() {
   local db_json json act new_db mode is_admin=0
   [ "$username" = "admin" ] && is_admin=1
   while true; do
-    sync_user_usage_counters || return 1
-    db_json="$(user_db_load)"
-    json="$(config_load)"
+    user_manager_reconcile_user_state || return 1
+    db_json="$(user_db_load)" || return 1
+    json="$(user_manager_config_for_edit)" || return 1
     clear
     print_rect_title "管理用户 · ${username}"
     show_user_status_table "$db_json"
@@ -558,10 +566,10 @@ user_manage_single() {
     show_user_allowed_nodes "$db_json" "$username"
     ui_hr
     local toggle_txt
-    if user_db_user_is_enabled "$db_json" "$username"; then
-      toggle_txt="停用该用户"
+    if jq -e --arg u "$username" '.users[$u].admin_allowed == true' <<< "$db_json" >/dev/null; then
+      toggle_txt="禁止接入"
     else
-      toggle_txt="启用该用户"
+      toggle_txt="允许接入（仍检查到期和额度）"
     fi
     echo -e "  ${C}1.${NC} ${toggle_txt}"
     [ $is_admin -eq 0 ] && echo -e "  ${C}2.${NC} 节点权限"
@@ -575,10 +583,10 @@ user_manage_single() {
     read -r -p "请选择操作（回车返回）: " act
     case "${act:-}" in
       1)
-        if user_db_user_is_enabled "$db_json" "$username"; then
-          new_db="$(printf '%s\n' "$db_json" | jq --arg u "$username" '.users[$u].enabled = false | .users[$u].disabled_reason = "manual"')"
+        if jq -e --arg u "$username" '.users[$u].admin_allowed == true' <<< "$db_json" >/dev/null; then
+          new_db="$(user_db_set_admin_allowed "$db_json" "$username" false)"
         else
-          new_db="$(printf '%s\n' "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')"
+          new_db="$(user_db_set_admin_allowed "$db_json" "$username" true)"
         fi
         user_manager_commit_edit "$db_json" "$new_db" edit "$username" || true
         ;;
@@ -627,33 +635,10 @@ user_manage_single() {
   done
 }
 
-user_select_and_manage_menu() {
-  local db_json usernames=() ans idx username
-  db_json="$(user_db_load)"
-  clear
-  print_rect_title "管理用户"
-  show_user_status_table "$db_json"
-  mapfile -t usernames < <(user_db_all_users "$db_json")
-  local i=1
-  for username in "${usernames[@]}"; do
-    echo " [$i] $username"
-    i=$((i+1))
-  done
-  read -r -p "请选择用户（回车返回上一级）: " ans
-  [ -z "${ans:-}" ] && return 0
-  if ! [[ "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#usernames[@]}" ]; then
-    warn "无效输入：$ans"
-    pause
-    return 1
-  fi
-  idx=$((ans-1))
-  user_manage_single "${usernames[$idx]}"
-}
-
 user_delete_menu() {
   local db_json json usernames=() ans new_db picks=() part idx username
-  db_json="$(user_db_load)"
-  json="$(config_load)"
+  db_json="$(user_db_load)" || return 1
+  json="$(user_manager_config_for_edit)" || return 1
   clear
   print_rect_title "删除用户"
   show_user_status_table "$db_json"
@@ -698,35 +683,30 @@ user_delete_menu() {
 }
 
 user_manager_menu() {
-  if ! user_db_exists; then
-    init_manager_env || { pause; return 0; }
-    # 自愈：6.1.5 安装事务把 ensure_user_manager_ready 失败改成 warn，
-    # 这里给用户管理菜单一个"进入时重试创建"的机会，避免用户卡在死循环。
-    ensure_user_manager_ready || {
-      err "用户数据库初始化失败，请检查 $USER_DB_FILE 所在磁盘和权限后再试。"
-      pause
-      return 0
-    }
-  fi
+  ensure_user_manager_ready || { pause; return 0; }
+  local db_json choice
+  local accounts=()
   while true; do
-    sync_user_usage_counters >/dev/null 2>&1 || true
-    local db_json
-    db_json="$(user_db_load)"
+    user_manager_reconcile_user_state >/dev/null || return 1
+    db_json="$(user_db_load)" || return 1
     clear
-    print_rect_title "用户与流量管理"
-    show_user_status_table "$db_json"
-    echo -e "  ${C}1.${NC} 新增用户"
-    echo -e "  ${C}2.${NC} 管理用户 ${D}(启停 / 套餐 / 续期 / 权限 / 导链接)${NC}"
-    echo -e "  ${R}3.${NC} 删除用户"
-    echo -e "  ${D}0. 返回主菜单${NC}"
-    ui_hr
-    read -r -p "请选择操作（回车返回）: " act
-    case "${act:-}" in
-      1) user_add_menu || true ;;
-      2) user_select_and_manage_menu || true ;;
-      3) user_delete_menu || true ;;
+    print_rect_title "用户管理"
+    show_user_status_table "$db_json" 1
+    mapfile -t accounts < <(user_db_all_users "$db_json")
+    printf '  a. 新增用户   d. 删除用户   0. 返回\n'
+    read -r -p "选用户查看详情（回车返回）: " choice || return 0
+    case "${choice:-}" in
+      a) user_add_menu || true ;;
+      d) user_delete_menu || true ;;
       0|q|Q|"") return 0 ;;
-      *) warn "无效输入：$act"; sleep 1 ;;
+      *)
+        if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -le "${#accounts[@]}" ]; then
+          user_manage_single "${accounts[$((choice - 1))]}" || true
+        else
+          warn "请选择列表中的用户。"
+          pause
+        fi
+        ;;
     esac
   done
 }

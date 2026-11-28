@@ -5,8 +5,8 @@ cd "$(dirname "$0")/.."
 for module in 00_base 01_utils 10_config 20_protocol 30_route 40_relay 50_v2ray_api 60_user_db 61_user_manager; do source "lib/$module.sh"; done
 out=${1:?fixture directory}; base=${2:?base port}
 mkdir -p "$out"
+ensure_self_signed_cert localhost "$out/cert.pem" "$out/key.pem"
 ensure_self_signed_cert() { :; }
-openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes -keyout "$out/key.pem" -out "$out/cert.pem" -days 1 -subj '/CN=localhost' >/dev/null 2>&1
 pair=$(sing-box generate reality-keypair)
 private=$(echo "$pair"|awk '/PrivateKey/ {print $2}')
 echo "$pair"|awk '/PublicKey/ {print $2}' > "$out/public.key"

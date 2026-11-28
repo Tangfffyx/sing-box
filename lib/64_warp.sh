@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 # ============================================================
 # 模块: 64_warp.sh
-# 职责: 借用外部 WireProxy SOCKS，为 sing-box 管理 WARP 网站分流
+# 职责: 管理 WARP 网站分流和生效状态
 # 依赖: 00_base.sh, 01_utils.sh, 10_config.sh, 30_route.sh, 50_v2ray_api.sh
 # ============================================================
 
 WARP_PROXY_FILE="/etc/wireguard/proxy.conf"
 WARP_RULE_BASE_URL="https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set"
 WARP_RULE_LOOKUP_URL="https://github.com/SagerNet/sing-geosite/tree/rule-set"
-WARP_SCRIPT_DOC_URL="https://gitlab.com/fscarmen/warp"
-WARP_SCRIPT_RAW_URL="https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
 
 warp_hr() {
   ui_hr
 }
 
 warp_meta_json() {
-  meta_load | jq -c '
+  warp_meta_json_from_meta "$(meta_load)"
+}
+
+warp_meta_json_from_meta() {
+  jq -c '
     (.warp // {mode:"off", rules:[]})
     | .mode = (if (.mode // "off") == "rules" then "rules" else "off" end)
     | .rules = [
@@ -24,7 +26,7 @@ warp_meta_json() {
         | select((.file // "") != "")
         | .tag = ("relay-" + ((.file // "" | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-")))
       ]
-  '
+  ' <<< "$1"
 }
 
 warp_meta_rules_json() {
@@ -108,10 +110,6 @@ warp_normalize_rule_file() {
   split_rule_normalize_file "$@"
 }
 
-warp_validate_rule_file() {
-  split_rule_validate_remote_file "$@"
-}
-
 warp_rule_add_meta() {
   local name="$1" file="$2" warp_json
   warp_json="$(warp_rule_add_meta_to_json "$(warp_meta_json)" "$name" "$file")" || return 1
@@ -148,61 +146,12 @@ warp_init_env() {
 warp_require_singbox() {
   has_cmd sing-box || {
     err "尚未安装 sing-box，无法写入 WARP 分流规则。"
-    warn "请先在主菜单进入「7. 安装与卸载」安装 sing-box。"
+    warn "请先在主菜单进入「安装与卸载」安装 sing-box。"
     pause
     return 1
   }
   config_ensure_exists
   ensure_manager_file_permissions
-}
-
-warp_proxy_conf_bind_address() {
-  [ -s "$WARP_PROXY_FILE" ] || return 1
-  awk -F= '
-    /^[[:space:]]*BindAddress[[:space:]]*=/ {
-      value=$2
-      gsub(/[[:space:]]/, "", value)
-      if (value != "") print value
-      exit
-    }
-  ' "$WARP_PROXY_FILE"
-}
-
-warp_ss_line_for_addr() {
-  local addr="$1"
-  [ -n "$addr" ] || return 1
-  has_cmd ss || return 1
-  ss -nltp 2>/dev/null | awk -v a="$addr" '$4 == a && $0 ~ /wireproxy/ {print; found=1; exit} END {exit !found}'
-}
-
-warp_wireproxy_socks_addr() {
-  local addr
-  addr="$(warp_proxy_conf_bind_address 2>/dev/null || true)"
-  if [ -n "$addr" ] && warp_ss_line_for_addr "$addr" >/dev/null 2>&1; then
-    echo "$addr"
-    return 0
-  fi
-  has_cmd ss || return 1
-  ss -nltp 2>/dev/null | awk '/wireproxy/ {print $4; found=1; exit} END {exit !found}'
-}
-
-warp_wireproxy_ready() {
-  warp_wireproxy_socks_addr >/dev/null 2>&1
-}
-
-warp_wireproxy_port() {
-  local addr port
-  addr="$(warp_wireproxy_socks_addr)" || return 1
-  port="${addr##*:}"
-  port="${port%]}"
-  [[ "$port" =~ ^[0-9]+$ ]] || return 1
-  echo "$port"
-}
-
-warp_wireproxy_display() {
-  local addr
-  addr="$(warp_wireproxy_socks_addr 2>/dev/null || true)"
-  [ -n "$addr" ] && echo "$addr" || echo "无"
 }
 
 warp_preset_rule() {
@@ -246,160 +195,123 @@ warp_rules_print_numbered() {
 }
 
 warp_config_project_json() {
-  local json="$1" rules_json="$2" ready="$3" port="$4"
-  echo "$json" | jq \
-    --argjson rules "$rules_json" \
-    --argjson ready "$ready" \
-    --argjson port "$port" '
-    def rule_set_array:
-      ((.rule_set // []) | if type == "array" then . else [.] end);
-    ($rules | map(.tag // "") | unique) as $managed_tags
-    |
-    .route = (.route // {"rules":[],"final":"reject"})
-    | .route.rules = (.route.rules // [])
-    | .route.rules = (
-        .route.rules
-        | map(select(
-            ((.outbound // "") != "warp")
-            and ((rule_set_array | any(. as $tag | ($tag | startswith("warp-geosite-")) or (($managed_tags | index($tag)) != null))) | not)
-          ))
-      )
+  local json="$1" rules="$2" backend="$3"
+  jq --argjson rules "$rules" --argjson backend "$backend" '
+    ($rules | map(.tag)) as $wanted
+    | ([.route.rules[]? | select(.outbound == "warp") | .rule_set // [] |
+        if type == "array" then .[] else . end] + $wanted | unique) as $managed
+    | .route = (.route // {rules:[]})
+    | .route.rules = [.route.rules[]? | select(.outbound != "warp")]
     | .route.rule_set = (
-        ((.route.rule_set // [])
-          | map(
-              (.tag // "") as $tag
-              | select((($tag | startswith("warp-geosite-")) or (($managed_tags | index($tag)) != null)) | not)
-            )
-        )
-        + (if $ready then
-            ($rules | map({type:"remote", tag:.tag, format:"binary", url:.url, http_client:{version:2,detour:"direct"}}))
-          else [] end)
+        [.route.rule_set[]? | .tag as $tag
+          | select(($tag|startswith("warp-geosite-")|not) and ($managed|index($tag))==null)]
+        + ($rules | map({type:"remote",tag:.tag,format:"binary",url:.url,http_client:{version:2,detour:"direct"}}))
       )
-    | .outbounds = (
-        ((.outbounds // []) | map(select((.tag // "") != "warp")))
-        + (if $ready then [{type:"socks", tag:"warp", server:"127.0.0.1", server_port:$port}] else [] end)
-      )
-  '
+    | .outbounds = ([.outbounds[]? | select(.tag != "warp")]
+        + (if $backend.type == "socks" then [$backend] else [] end))
+    | .endpoints = ([.endpoints[]? | select(.tag != "warp")]
+        + (if $backend.type == "wireguard" then [$backend] else [] end))
+    | if .endpoints == [] then del(.endpoints) else . end
+    | if $backend.type == "wireguard" then
+        .dns.servers = ([.dns.servers[]? | select(.tag != "sb-warp-resolver")]
+          + [{type:"local",tag:"sb-warp-resolver"}])
+      elif any(.dns.servers[]?; .tag=="sb-warp-resolver") then
+        .dns.servers |= map(select(.tag != "sb-warp-resolver"))
+        | if .dns == {servers:[]} then del(.dns) else . end
+      else . end
+  ' <<< "$json"
 }
 
 warp_apply_meta_json_state() {
-  local meta_json="$1" json warp_json rules_json ready port projected rebuilt
-  warp_require_singbox || return 1
-  warp_json="$(echo "$meta_json" | jq -c '
-    (.warp // {mode:"off", rules:[]})
-    | .mode = (if (.mode // "off") == "rules" then "rules" else "off" end)
-    | .rules = [
-        (.rules // [])[]?
-        | select((.file // "") != "")
-        | .tag = ("relay-" + ((.file // "" | sub("\\.srs$"; "")) | gsub("[^A-Za-z0-9_-]"; "-")))
-      ]
-  ')" || return 1
-  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
-  json="$(config_load)"
-  rules_json="$(echo "$warp_json" | jq -c '[.rules[]? | select((.tag // "") != "" and (.file // "") != "")] | unique_by(.tag)')" || return 1
-  ready=false
-  port=0
-  if warp_wireproxy_ready; then
-    ready=true
-    port="$(warp_wireproxy_port)" || return 1
+  local previous="$1" meta_json="$2" backend="$3" json rules projected rebuilt
+  json="$(user_manager_config_for_edit)" || return 1
+  rules="$(jq -c '.warp.rules // [] | unique_by(.tag)' <<< "$meta_json")" || return 1
+  if [ "$rules" = '[]' ]; then
+    backend=null
+  elif [ "$backend" = null ]; then
+    backend="$(jq -c 'first((.outbounds[]?, .endpoints[]?)|select(.tag=="warp")) // null' <<< "$json")" || return 1
+    [ "$backend" != null ] || { err "当前分流缺少出口，请重新选择要启用的网站。"; return 1; }
   fi
-  projected="$(warp_config_project_json "$json" "$rules_json" "$ready" "$port")" || return 1
-  rebuilt="$(route_rebuild "$projected" "$meta_json")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_and_meta_apply "$rebuilt" "$meta_json"
-}
-
-warp_apply_current_state() {
-  warp_apply_meta_json_state "$(meta_load)"
-}
-
-warp_require_wireproxy_ready() {
-  if warp_wireproxy_ready; then
+  projected="$(warp_config_project_json "$json" "$rules" "$backend")" || return 1
+  rebuilt="$(relay_project_partial_state_with_meta "$projected" "$meta_json")" || return 1
+  if [ "$(jq -Sc . <<< "$json")" = "$(jq -Sc . <<< "$rebuilt")" ] &&
+     [ "$(jq -Sc . <<< "$previous")" = "$(jq -Sc . <<< "$meta_json")" ]; then
     return 0
   fi
-  err "还没检测到本地 WARP 代理（WireProxy），暂时无法开启分流。"
-  warn "请先按页面提示安装 WireProxy 后再试。"
-  pause
-  return 1
+  if ! run_with_spinner "应用 WARP 分流" with_manager_lock protocol_commit_changes "$json" "$previous" "$rebuilt" "$meta_json"; then
+    err "分流应用失败。请查看上方配置检查或回滚结果。"
+    return 1
+  fi
+}
+
+warp_validate_download() (
+  local file="$1" dir url
+  umask 077
+  dir="$(mktemp -d)" || return 1
+  trap 'rm -rf "$dir"' EXIT
+  url="$(warp_rule_url_for_file "$file")" || return 1
+  curl -q -fsSL --proto '=https' --connect-timeout 8 --max-time 20 "$url" -o "$dir/rule.srs" &&
+    sing-box rule-set decompile -o "$dir/rule.json" "$dir/rule.srs" >/dev/null
+)
+
+warp_enable_rules() {
+  local files_json previous relay_json warp_json next backend file item
+  local -a items=("$@") files=()
+  for item in "${items[@]}"; do files+=("${item#*|}"); done
+  files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
+  previous="$(meta_load)" || return 1
+  split_rule_confirm_relay_to_warp "$files_json" || return 1
+  warp_json="$(warp_meta_json_from_meta "$previous")" || return 1
+  for item in "${items[@]}"; do
+    file="${item#*|}"
+    if ! jq -e --arg file "$file" 'any(.rules[]?; .file==$file)' <<< "$warp_json" >/dev/null; then
+      if ! run_with_spinner "下载并检查 $file" warp_validate_download "$file"; then
+        err "规则下载或格式检查失败：$file"
+        return 1
+      fi
+    fi
+    warp_json="$(warp_rule_add_meta_to_json "$warp_json" "${item%%|*}" "$file")" || return 1
+  done
+  warp_prepare_backend backend || return 1
+  relay_json="$(relay_meta_json_from_meta "$previous")" || return 1
+  relay_json="$(relay_rule_remove_meta_by_files_json_from "$relay_json" "$files_json")" || return 1
+  next="$(relay_meta_replace_in_meta_json "$previous" "$relay_json")" || return 1
+  next="$(warp_meta_replace_in_meta_json "$next" "$warp_json")" || return 1
+  warp_apply_meta_json_state "$previous" "$next" "$backend" || return 1
+  ok "所选网站已走 WARP。"
 }
 
 warp_add_preset_rules() {
-  local raw="$1" picks=() names=() files=() pick item name file files_json meta_json relay_json warp_json
-  warp_require_singbox || return 1
-  warp_require_wireproxy_ready || return 1
+  local raw="$1" pick
+  local -a picks=() items=()
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ "${#picks[@]}" -gt 0 ] || return 1
   for pick in "${picks[@]}"; do
     if ! [[ "$pick" =~ ^[1-6]$ ]]; then
-      err "只能使用 1-6，并用 + 连接。"
-      pause
+      err "请输入 1–6，多个编号用 + 连接。"
       return 1
     fi
+    items+=("$(warp_preset_rule "$pick")")
   done
-  for pick in "${picks[@]}"; do
-    item="$(warp_preset_rule "$pick")" || return 1
-    name="${item%%|*}"
-    file="${item#*|}"
-    names+=("$name")
-    files+=("$file")
-  done
-  files_json="$(split_rule_files_json_from_args "${files[@]}")" || return 1
-  split_rule_confirm_relay_to_warp "$files_json" || {
-    warn "已取消，未修改 WARP 分流规则。"
-    pause
-    return 0
-  }
-  meta_json="$(meta_load)"
-  relay_json="$(relay_rule_remove_meta_by_files_json_from "$(relay_meta_json)" "$files_json")" || return 1
-  warp_json="$(warp_meta_json)"
-  for pick in "${!files[@]}"; do
-    warp_json="$(warp_rule_add_meta_to_json "$warp_json" "${names[$pick]}" "${files[$pick]}")" || return 1
-  done
-  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
-  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
-  warp_apply_meta_json_state "$meta_json" || return 1
-  ok "WARP 分流规则已应用。"
-  pause
+  warp_require_singbox && warp_enable_rules "${items[@]}"
 }
 
 warp_custom_rule_menu() {
-  local raw file name files_json meta_json relay_json warp_json
-  warp_require_singbox || return 1
-  warp_require_wireproxy_ready || return 1
+  local raw file
   clear
   print_rect_title "自定义网站规则"
-  echo "请先在以下页面查找规则名："
-  echo "$WARP_RULE_LOOKUP_URL"
-  echo
-  echo "例如：openai 或 geosite-openai 或 geosite-openai.srs"
-  read -r -p "请输入规则名（回车返回）：" raw
-  [ -n "${raw:-}" ] || return 0
-  file="$(warp_normalize_rule_file "$raw")" || { pause; return 1; }
-  if ! warp_validate_rule_file "$file"; then
-    err "未在 SagerNet rule-set 中找到：$file"
-    pause
-    return 1
-  fi
-  name="自定义：${file%.srs}"
-  files_json="$(split_rule_files_json_from_args "$file")" || return 1
-  split_rule_confirm_relay_to_warp "$files_json" || {
-    warn "已取消，未修改 WARP 分流规则。"
-    pause
-    return 0
-  }
-  meta_json="$(meta_load)"
-  relay_json="$(relay_rule_remove_meta_by_files_json_from "$(relay_meta_json)" "$files_json")" || return 1
-  warp_json="$(warp_rule_add_meta_to_json "$(warp_meta_json)" "$name" "$file")" || return 1
-  meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
-  meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
-  warp_apply_meta_json_state "$meta_json" || return 1
-  ok "自定义 WARP 分流已添加：$file"
-  pause
+  echo "输入规则名，例如 openai。规则列表：$WARP_RULE_LOOKUP_URL"
+  read -r -p "规则名（回车返回）: " raw || return 0
+  [ -n "$raw" ] || return 0
+  file="$(warp_normalize_rule_file "$raw")" || return 1
+  warp_require_singbox && warp_enable_rules "${file%.srs}|$file"
 }
 
 warp_rules_delete_menu() {
-  local rules_json count raw n tag tags_json has_delete_all=0 meta_json warp_json
+  local rules_json count raw n tag tags_json has_delete_all=0 meta_json warp_json previous
   local -a idx=()
   local -a selected_tags=()
+  previous="$(meta_load)" || return 1
   rules_json="$(warp_meta_rules_json)"
   count="$(echo "$rules_json" | jq 'length')"
   [ "$count" -gt 0 ] || { warn "当前没有可删除的 WARP 分流。"; pause; return 0; }
@@ -429,9 +341,9 @@ warp_rules_delete_menu() {
       pause
       return 1
     fi
-    ask_confirm_yn "确认删除全部 WARP 分流？(y/N): " || return 0
-    meta_json="$(warp_meta_replace_in_meta_json "$(meta_load)" '{"mode":"off","rules":[]}')" || return 1
-    warp_apply_meta_json_state "$meta_json" || return 1
+    ask_confirm_yn "确认取消全部 WARP 分流？(y/N): " || return 0
+    meta_json="$(warp_meta_replace_in_meta_json "$previous" '{"mode":"off","rules":[]}')" || return 1
+    warp_apply_meta_json_state "$previous" "$meta_json" null || return 1
     ok "已删除全部 WARP 分流。"
     pause
     return 0
@@ -448,65 +360,21 @@ warp_rules_delete_menu() {
   done
   tags_json="$(printf '%s\n' "${selected_tags[@]}" | jq -R . | jq -s '.')" || { pause; return 1; }
   warp_json="$(warp_rule_remove_meta_by_tags_json_from "$(warp_meta_json)" "$tags_json")" || return 1
-  meta_json="$(warp_meta_replace_in_meta_json "$(meta_load)" "$warp_json")" || return 1
-  warp_apply_meta_json_state "$meta_json" || return 1
+  meta_json="$(warp_meta_replace_in_meta_json "$previous" "$warp_json")" || return 1
+  warp_apply_meta_json_state "$previous" "$meta_json" null || return 1
   ok "已删除指定 WARP 分流。"
   pause
 }
 
-warp_print_header() {
-  print_rect_title "WARP 分流管理"
-  warp_hr
-  echo "说明：WARP 分流依赖 fscarmen WARP 脚本的 WireProxy 方案。"
-  echo "详情：$WARP_SCRIPT_DOC_URL"
-  warp_hr
-}
-
-warp_print_status() {
-  if warp_wireproxy_ready; then
-    echo "WireProxy SOCKS：已就绪"
-  else
-    echo "WireProxy SOCKS：未就绪"
-  fi
-  echo "本地 SOCKS：$(warp_wireproxy_display)"
-  echo
-  split_rule_overview_lines
-  warp_hr
-}
-
-warp_print_install_hint() {
-  echo "请先安装 WireProxy 方案："
-  echo
-  echo "wget -N $WARP_SCRIPT_RAW_URL"
-  echo "bash menu.sh w"
-  echo
-  echo "安装完成后重新进入本菜单即可。"
-  echo
-}
-
 warp_manager_menu() {
-  local act count
+  local act
   warp_init_env || { pause; return 0; }
   while true; do
     clear
-    warp_print_header
-    warp_print_status
-    count="$(warp_rules_count)"
-    if ! warp_wireproxy_ready; then
-      warp_print_install_hint
-      if [ "$count" -gt 0 ]; then
-        echo -e "  ${C}8.${NC} 删除分流"
-      fi
-      echo -e "  ${R}0.${NC} 返回上一级"
-      read -r -p "请选择操作: " act
-      case "${act:-}" in
-        0|q|Q|"") return 0 ;;
-        8) [ "$count" -gt 0 ] && warp_rules_delete_menu || { warn "无效输入：$act"; sleep 1; } ;;
-        *) warn "无效输入：$act"; sleep 1 ;;
-      esac
-      continue
-    fi
-
+    print_rect_title "WARP 分流"
+    echo "让选中的网站走 WARP。首次使用会自动配置。"
+    split_rule_overview_lines
+    warp_hr
     echo -e "  ${C}1.${NC} AI 服务"
     echo -e "  ${C}2.${NC} Google"
     echo -e "  ${C}3.${NC} Netflix"
@@ -518,12 +386,12 @@ warp_manager_menu() {
     echo -e "  ${R}0.${NC} 返回上一级"
     echo
     echo "1-6支持用+连接，例如：1+3+6"
-    read -r -p "请选择操作: " act
+    read -r -p "选择网站或操作: " act || return 0
     case "${act:-}" in
       0|q|Q|"") return 0 ;;
-      7) warp_custom_rule_menu || true ;;
+      7) warp_custom_rule_menu || true; pause ;;
       8) warp_rules_delete_menu || true ;;
-      *+*|[1-6]) warp_add_preset_rules "$act" || true ;;
+      *+*|[1-6]) warp_add_preset_rules "$act" || true; pause ;;
       *) warn "无效输入：$act"; sleep 1 ;;
     esac
   done

@@ -174,12 +174,17 @@ tg_task_receipt_get() {
 
 # 预留 receipt 占位：写入成功才允许执行任务，避免崩溃后无法识别已开过头的任务
 tg_task_receipt_reserve() {
+  with_manager_lock _tg_task_receipt_reserve_body "$@"
+}
+
+_tg_task_receipt_reserve_body() {
   local task_id="$1" now receipts
   [ -n "$task_id" ] || return 1
   now="$(date +%s)"
   receipts="$(tg_task_receipts_load | jq --arg id "$task_id" --argjson now "$now" '
     .tasks = (.tasks // {})
-    | .tasks[$id] = {status:"running", started_at:$now}
+    | if .tasks[$id] != null then error("任务已领取") else
+        .tasks[$id] = {status:"running", started_at:$now} end
     | .tasks |= with_entries(select(($now - (.value.completed_at // .value.started_at // $now)) <= 604800))
   ')" || return 1
   tg_task_receipts_save "$receipts"
@@ -187,6 +192,10 @@ tg_task_receipt_reserve() {
 
 # 任务执行结束后落盘最终结果；保存失败必须返回非零，由调用方决定是否上报主控
 tg_task_receipt_finalize() {
+  with_manager_lock _tg_task_receipt_finalize_body "$@"
+}
+
+_tg_task_receipt_finalize_body() {
   local task_id="$1" ok_value="$2" message="$3" now receipts ok_bool
   [ -n "$task_id" ] || return 1
   if [ "$ok_value" = "true" ]; then ok_bool="true"; else ok_bool="false"; fi
@@ -362,7 +371,7 @@ remove_tg_agent_cron()  { _remove_cron_job "$TG_AGENT_CRON_MARK"; }
 
 tg_collect_report_json() {
   local cfg="$1" db_json
-  db_json="$(user_db_load)"
+  db_json="$(user_db_load)" || return 1
   echo "$db_json" | jq \
     --arg vps_id "$(echo "$cfg" | jq -r '.vps_id // ""')" \
     --arg vps_name "$(echo "$cfg" | jq -r '.vps_name // ""')" \
@@ -434,12 +443,12 @@ tg_task_apply_db() {
 
 tg_task_exec_set_enabled() {
   local db_json="$1" username="$2" enabled="$3" new_db
+  new_db="$(user_db_set_admin_allowed "$db_json" "$username" "$enabled")" || return 1
+  tg_task_apply_db "$new_db" || return 1
   if [ "$enabled" = "true" ]; then
-    new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = true | .users[$u].disabled_reason = null')" || return 1
-    tg_task_apply_db "$new_db" && echo "用户已启用。"
+    echo "已允许接入，仍按到期和额度判断。"
   else
-    new_db="$(echo "$db_json" | jq --arg u "$username" '.users[$u].enabled = false | .users[$u].disabled_reason = "manual"')" || return 1
-    tg_task_apply_db "$new_db" && echo "用户已停用。"
+    echo "用户已停用。"
   fi
 }
 
@@ -447,7 +456,7 @@ tg_task_exec_set_quota() {
   local db_json="$1" username="$2" quota="$3" new_db text
   [[ "$quota" =~ ^[0-9]+$ ]] || return 1
   new_db="$(echo "$db_json" | jq --arg u "$username" --argjson quota "$quota" '.users[$u].quota_gb = $quota')" || return 1
-  if [ "$quota" = "0" ]; then text="不限"; else text="${quota}GB"; fi
+  if [ "$quota" = "0" ]; then text="不限"; else text="${quota} GiB"; fi
   tg_task_apply_db "$new_db" && echo "套餐已修改为 ${text}。"
 }
 
@@ -544,19 +553,19 @@ tg_execute_task() {
 }
 
 _tg_execute_task_body() {
-  local task="$1" action username db_json exists params result
+  local task="$1" action username db_json exists params result _USER_SAMPLE_FAILED
   action="$(echo "$task" | jq -r '.action // empty')"
   username="$(echo "$task" | jq -r '.username // empty')"
   [ -n "$action" ] && [ -n "$username" ] || { echo "任务参数不完整。"; return 1; }
-  user_db_exists || { echo "用户数据库不存在。"; return 1; }
-  sync_user_usage_counters || return 1
-  db_json="$(user_db_load)"
+  user_db_exists || { user_db_restore_hint; return 1; }
+  user_manager_sample_before_change
+  db_json="$(user_db_load)" || return 1
   exists="$(echo "$db_json" | jq -r --arg u "$username" 'if .users[$u] then "1" else "0" end')"
   [ "$exists" = "1" ] || { echo "用户不存在：$username"; return 1; }
   params="$(echo "$task" | jq -c '.params // {}')"
   case "$action" in
     set_enabled)
-      tg_task_exec_set_enabled "$db_json" "$username" "$(echo "$params" | jq -r '.enabled // false')" ;;
+      tg_task_exec_set_enabled "$db_json" "$username" "$(echo "$params" | jq -r '.enabled == true')" ;;
     set_quota)
       tg_task_exec_set_quota "$db_json" "$username" "$(echo "$params" | jq -r '.quota_gb // empty')" ;;
     renew)
@@ -744,7 +753,7 @@ tg_refresh_after_singbox_install() {
 
   if [ "$role" = "center" ]; then
     if ! tg_install_center_service; then
-      warn "TG Bot 服务刷新失败，请稍后进入 TG Bot 管理检查。"
+      warn "TG Bot 服务刷新失败，请到「Telegram Bot」检查。"
       return 0
     fi
   fi
@@ -783,12 +792,15 @@ tg_setup_center() {
   cur_vps_name="$(echo "$cfg" | jq -r '.vps_name // empty')"
   cur_username="$(echo "$cfg" | jq -r '.bot_username // empty')"
 
+  echo "先在 Telegram 找 @BotFather 创建机器人，复制 Bot Token，并准备你的 Telegram 数字 ID。"
   # Bot Token（敏感字段不显示当前值）
   if [ -n "$cur_token" ]; then
-    read -r -p "Bot Token（回车保持当前值）: " token
+    read -rs -p "Bot Token（回车保持当前值）: " token || return 0
+    printf '\n' >&2
     [ -n "$token" ] || token="$cur_token"
   else
-    read -r -p "Bot Token（回车返回）: " token
+    read -rs -p "Bot Token（回车返回）: " token || return 0
+    printf '\n' >&2
     [ -n "$token" ] || { warn "Bot Token 不能为空。"; pause; return 1; }
   fi
 
@@ -844,10 +856,11 @@ tg_setup_center() {
   else
     warn "TG Bot 已配置，但首次上报失败，请检查服务状态或稍后再试。"
   fi
-  ok "主控节点已配置。"
+  ok "本机机器人已配置。"
   param_echo "主控地址" "$public_url"
   param_echo "接入密钥" "$secret"
-  param_echo "Bot 用户名" "@${username}"
+  echo "在 Telegram 打开 @${username}，点「开始」，再回「Telegram Bot」选 3 发送测试。"
+  echo "接入第二台服务器时，复制上方的主控地址和接入密钥。"
   pause
 }
 
@@ -859,6 +872,7 @@ tg_setup_agent() {
   cur_secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
   cur_vps_name="$(echo "$cfg" | jq -r '.vps_name // empty')"
 
+  echo "到运行机器人的服务器，打开「Telegram Bot」，复制主控地址和接入密钥。"
   # 主控地址（非敏感，显示当前值）
   if [ -n "$cur_url" ]; then
     read -r -p "主控地址（回车保持当前值: ${cur_url}）: " center_url
@@ -871,10 +885,12 @@ tg_setup_agent() {
 
   # 接入密钥（敏感字段不显示当前值）
   if [ -n "$cur_secret" ]; then
-    read -r -p "接入密钥（回车保持当前值）: " secret
+    read -rs -p "接入密钥（回车保持当前值）: " secret || return 0
+    printf '\n' >&2
     [ -n "$secret" ] || secret="$cur_secret"
   else
-    read -r -p "接入密钥（回车返回）: " secret
+    read -rs -p "接入密钥（回车返回）: " secret || return 0
+    printf '\n' >&2
     [ -n "$secret" ] || { warn "接入密钥不能为空。"; pause; return 1; }
   fi
 
@@ -900,19 +916,19 @@ tg_setup_agent() {
   else
     warn "已保存配置，但首次上报失败，请检查主控地址、接入密钥或防火墙。"
   fi
-  ok "普通节点已配置。"
+  ok "已保存本机接入设置。"
   pause
 }
 
 tg_setup_menu() {
   local cfg enabled role ans
   clear
-  print_rect_title "设置/启动TG Bot"
+  print_rect_title "设置机器人"
   cfg="$(tg_config_load)"
   enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
   if [ "$enabled" != "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
-    read -r -p "检测到已保留配置，是否直接启动？[Y/n]: " ans
+    read -r -p "检测到已保留配置，是否恢复运行？[Y/n]: " ans || return 0
     case "${ans:-Y}" in
       [Nn]*) ;;
       *)
@@ -922,8 +938,8 @@ tg_setup_menu() {
         ;;
     esac
   fi
-  echo "  1. 主控节点"
-  echo "  2. 普通节点"
+  echo "  1. 在本机运行机器人（只有一台服务器就选这个）"
+  echo "  2. 把本机接入已有机器人"
   echo "  0. 返回上一级"
   read -r -p "请选择本机模式: " role
   case "${role:-}" in
@@ -939,9 +955,9 @@ tg_generate_bind_link_menu() {
   cfg="$(tg_config_load)"
   enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
-  [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; } || { warn "请先设置/启动TG Bot。"; pause; return 0; }
+  [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; } || { warn "请先在「Telegram Bot」选 1 设置或恢复机器人。"; pause; return 0; }
   user_db_exists || { warn "用户数据库不存在，请先安装并创建用户。"; pause; return 0; }
-  db_json="$(user_db_load)"
+  db_json="$(user_db_load)" || return 1
   mapfile -t usernames < <(echo "$db_json" | jq -r '.users | keys[] | select(. != "admin")')
   [ ${#usernames[@]} -gt 0 ] || { warn "当前没有可绑定的普通用户。"; pause; return 0; }
   clear
@@ -953,7 +969,7 @@ tg_generate_bind_link_menu() {
   done
   read -r -p "请选择用户（回车返回上一级）: " ans
   [ -z "${ans:-}" ] && return 0
-  if ! [[ "$ans" =~ ^[0-9]+$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#usernames[@]}" ]; then
+  if ! [[ "$ans" =~ ^[1-9][0-9]*$ ]] || [ "$ans" -lt 1 ] || [ "$ans" -gt "${#usernames[@]}" ]; then
     warn "无效输入：$ans"
     pause
     return 0
@@ -976,6 +992,7 @@ tg_generate_bind_link_menu() {
     ok "绑定链接已生成，有效期 10 分钟。"
     param_echo "用户" "$username"
     param_echo "链接" "$link"
+    echo "把链接发给 ${username}，请对方在 10 分钟内打开并点「开始」。"
   else
     err "绑定链接生成失败，请检查主控服务和接入密钥。"
   fi
@@ -987,7 +1004,7 @@ tg_notify_test() {
   cfg="$(tg_config_load)"
   enabled="$(tg_config_enabled_value "$cfg")"
   role="$(echo "$cfg" | jq -r '.role // empty')"
-  [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; } || { warn "请先设置/启动TG Bot。"; pause; return 0; }
+  [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; } || { warn "请先在「Telegram Bot」选 1 设置或恢复机器人。"; pause; return 0; }
   if [ "$role" = "center" ]; then
     center_url="http://127.0.0.1:$(echo "$cfg" | jq -r '.listen_port // 25888')"
     secret="$(echo "$cfg" | jq -r '.access_secret // empty')"
@@ -1044,8 +1061,8 @@ tg_reload_center_service_menu() {
 
 tg_disable_menu() {
   clear
-  print_rect_title "卸载/停止TG Bot"
-  warn "该操作将停止 TG Bot 服务和上报任务。"
+  print_rect_title "停止机器人"
+  echo "停止本机的机器人服务或数据上报。"
   local keep_cfg
   read -r -p "是否保留 TG Bot 配置？[Y/n]: " keep_cfg
   remove_tg_agent_cron || true
@@ -1066,68 +1083,62 @@ tg_disable_menu() {
 }
 
 telegram_bot_manager_menu() {
+  local cfg enabled role role_label vps_name center_url access_secret act setup_label active
   while true; do
     clear
-    print_rect_title "Telegram Bot 管理"
-    local cfg enabled role role_label vps_name center_url access_secret
+    print_rect_title "Telegram Bot"
+    echo "管理员可以在 Telegram 管理用户，用户绑定后可以查自己的流量，也能收到到期提醒。"
     cfg="$(tg_config_load)"
     enabled="$(tg_config_enabled_value "$cfg")"
-    role="$(echo "$cfg" | jq -r '.role // "未设置"')"
-    vps_name="$(echo "$cfg" | jq -r '.vps_name // ""')"
-    center_url="$(echo "$cfg" | jq -r '.center_url // ""')"
-    access_secret="$(echo "$cfg" | jq -r '.access_secret // ""')"
-    if [ "$enabled" = "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
-      install_tg_agent_cron >/dev/null 2>&1 || true
+    role="$(jq -r '.role // ""' <<< "$cfg")"
+    vps_name="$(jq -r '.vps_name // ""' <<< "$cfg")"
+    center_url="$(jq -r '.center_url // ""' <<< "$cfg")"
+    access_secret="$(jq -r '.access_secret // ""' <<< "$cfg")"
+    setup_label="设置机器人"
+    active=0
+    case "$role" in
+      center) role_label="本机运行机器人" ;;
+      agent) role_label="已接入其他服务器的机器人" ;;
+      *) role_label="未设置" ;;
+    esac
+    if [ "$role" = center ] || [ "$role" = agent ]; then
+      if [ "$enabled" = true ]; then
+        active=1
+        install_tg_agent_cron >/dev/null 2>&1 || true
+      else
+        setup_label="恢复机器人"
+        role_label="${role_label}（已停止）"
+      fi
+    fi
+    printf '  当前状态：%s\n' "$role_label"
+    if [ -n "$vps_name" ]; then printf '  本机名称：%s\n' "$vps_name"; fi
+    if [ "$role" = center ] && [ -n "$center_url" ]; then
+      printf '  主控地址：%s\n  接入密钥：%s\n' "$center_url" "$access_secret"
     fi
     case "$role" in
-      center) role_label="主控节点" ;;
-      agent) role_label="普通节点" ;;
-      ""|"未设置") role_label="未设置" ;;
-      *) role_label="$role" ;;
+      '') echo "首次使用，选 1 设置机器人。" ;;
+      center|agent)
+        if [ "$active" -eq 0 ]; then echo "设置已保留，选 1 恢复。"; fi ;;
     esac
-    if [ "$enabled" != "true" ] && { [ "$role" = "center" ] || [ "$role" = "agent" ]; }; then
-      role_label="${role_label}（已停止）"
-    fi
-    echo -e "  ${D}当前模式：${NC}${W}${role_label}${NC}"
-    [ -n "$vps_name" ] && echo -e "  ${D}本机名称：${NC}${vps_name}"
-    [ -n "$center_url" ] && echo -e "  ${D}主控地址：${NC}${center_url}"
-    if [ "$role" = "center" ] && [ -n "$access_secret" ]; then
-      echo -e "  ${D}接入密钥：${NC}${C}${access_secret}${NC}"
-    fi
     ui_hr
-    echo -e "  ${C}1.${NC} 设置 / 启动 TG Bot"
-    echo -e "  ${C}2.${NC} 生成用户绑定链接"
-    echo -e "  ${C}3.${NC} 发送通知测试"
-    if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
-      echo -e "  ${C}4.${NC} 重启 / 刷新 TG Bot"
-      echo -e "  ${R}5.${NC} 停止 / 卸载 TG Bot"
-    else
-      echo -e "  ${R}4.${NC} 停止 / 卸载 TG Bot"
+    echo -e "  ${C}1.${NC} $setup_label"
+    if [ "$active" -eq 1 ]; then
+      echo -e "  ${C}2.${NC} 生成用户绑定链接"
+      echo -e "  ${C}3.${NC} 发送通知测试"
+      if [ "$role" = center ]; then echo -e "  ${C}4.${NC} 重启机器人"; fi
+      echo -e "  ${R}5.${NC} 停止机器人"
     fi
     echo -e "  ${D}0. 返回主菜单${NC}"
     ui_hr
-    local act
-    read -r -p "请选择操作（回车返回）: " act
+    read -r -p "请选择操作（回车返回）: " act || return 0
     case "${act:-}" in
-      1) tg_setup_menu ;;
-      2) tg_generate_bind_link_menu ;;
-      3) tg_notify_test ;;
-      4)
-        if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
-          tg_reload_center_service_menu
-        else
-          tg_disable_menu
-        fi
-        ;;
-      5)
-        if [ "$enabled" = "true" ] && [ "$role" = "center" ]; then
-          tg_disable_menu
-        else
-          warn "无效输入：$act"; sleep 1
-        fi
-        ;;
+      1) tg_setup_menu || true ;;
+      2) if [ "$active" -eq 1 ]; then tg_generate_bind_link_menu || true; else warn "请先选 1。"; pause; fi ;;
+      3) if [ "$active" -eq 1 ]; then tg_notify_test || true; else warn "请先选 1。"; pause; fi ;;
+      4) if [ "$active" -eq 1 ] && [ "$role" = center ]; then tg_reload_center_service_menu || true; else warn "只有运行机器人的服务器可以重启它。"; pause; fi ;;
+      5) if [ "$active" -eq 1 ]; then tg_disable_menu || true; else warn "机器人当前未运行。"; pause; fi ;;
       0|q|Q|"") return 0 ;;
-      *) warn "无效输入：$act"; sleep 1 ;;
+      *) warn "无效输入：$act"; pause ;;
     esac
   done
 }

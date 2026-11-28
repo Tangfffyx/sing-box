@@ -112,14 +112,6 @@ relay_full_summary_lines() {
 
 # ---------- SOCKS 落地 ----------
 
-relay_socks_outbound_json() {
-  local tag="$1" ip="$2" port="$3" username="${4:-}" password="${5:-}"
-  jq -n --arg tag "$tag" --arg ip "$ip" --arg username "$username" --arg password "$password" --argjson p "$port" '
-    {type:"socks", tag:$tag, server:$ip, server_port:$p}
-    | if $username != "" then . + {username:$username, password:$password} else . end
-  '
-}
-
 relay_prompt_landing_id() {
   local land_var="$1" _land
   read -r -p "落地标识（回车返回，如 sg01）: " _land
@@ -135,7 +127,7 @@ relay_prompt_landing_details() {
   local ip_var="$2" port_var="$3" username_var="$4" password_var="$5"
   local _ip _relay_port _username _password
 
-  read -r -p "落地 IP 地址（回车返回）: " _ip
+  read -r -p "落地地址（域名或 IP，回车返回）: " _ip
   [ -z "${_ip:-}" ] && { warn "已取消，返回上一级。"; return 1; }
 
   read -r -p "落地 SOCKS 端口（默认: 1080）: " _relay_port
@@ -147,7 +139,8 @@ relay_prompt_landing_details() {
 
   read -r -p "落地 SOCKS Username（无认证可留空）: " _username
   if [ -n "${_username:-}" ]; then
-    read -r -p "落地 SOCKS Password: " _password
+    read -rs -p "落地 SOCKS 密码: " _password || return 1
+    printf '\n' >&2
   else
     _password=""
   fi
@@ -176,19 +169,29 @@ relay_landing_from_outbound_json() {
         server:(.server // ""),
         port:(.server_port // 0),
         username:(.username // ""),
-        password:(.password // "")
+        password:(.password // ""),
+        udp_over_tcp:((.udp_over_tcp // false) | if type == "object" then .enabled == true else . == true end)
       }
   ' | head -n1
 }
 
 relay_known_landing_json() {
   local json="$1" land="$2" existing=""
-  existing="$(relay_meta_json | jq -c --arg id "$land" '.landings[$id] // empty' 2>/dev/null || true)"
+  existing="$(relay_meta_json | jq -c --arg id "$land" '.landings[$id] | select(. != null) | . + {id:$id}' 2>/dev/null || true)"
   if [ -n "$existing" ]; then
     echo "$existing"
     return 0
   fi
   existing="$(relay_landing_from_outbound_json "$json" "$land" "$(relay_outbound_tag "" "$land")" 2>/dev/null || true)"
+  if [ -z "$existing" ]; then
+    local legacy_tag
+    legacy_tag="$(relay_list_table "$json" | awk -F '\x01' -v land="$land" '
+      {n=$2; sub(/@.*/, "", n); tail="-to-" land
+       if (substr(n,length(n)-length(tail)+1)==tail && $3!="") {print $3; exit}}')"
+    if [ -n "$legacy_tag" ]; then
+      existing="$(relay_landing_from_outbound_json "$json" "$land" "$legacy_tag")"
+    fi
+  fi
   if [ -n "$existing" ]; then
     echo "$existing"
     return 0
@@ -211,150 +214,93 @@ relay_landing_display() {
 }
 
 relay_choose_landing_or_return() {
-  local json="$1" outvar="$2"
-  local selected_land
-
-  relay_prompt_landing_id selected_land || return 1
-  relay_choose_landing_by_id_or_return "$json" "$selected_land" "$outvar"
-}
-
-relay_choose_landing_by_id_or_return() {
-  local json="$1" selected_land="$2" outvar="$3"
-  local selected_ip selected_port selected_username selected_password candidate existing choice
-
-  existing="$(relay_known_landing_json "$json" "$selected_land")"
-
-  if echo "$existing" | jq -e 'type == "object" and (.server // "") != ""' >/dev/null 2>&1; then
-    echo
-    echo "当前落地机：$(relay_landing_display "$existing")"
-    echo
-    echo -e "  ${C}1.${NC} 使用已有落地机"
-    echo -e "  ${C}2.${NC} 更新落地机信息"
-    echo -e "  ${R}0.${NC} 返回上一级"
-    read -r -p "请选择操作: " choice
-    case "${choice:-}" in
-      1) printf -v "$outvar" '%s' "$existing"; return 0 ;;
-      2)
-        relay_prompt_landing_details "$selected_land" selected_ip selected_port selected_username selected_password || return 1
-        candidate="$(relay_landing_to_meta_json "$selected_land" "$selected_ip" "$selected_port" "$selected_username" "$selected_password")" || return 1
-        printf -v "$outvar" '%s' "$candidate"
-        return 0
-        ;;
-      *) warn "已取消，返回上一级。"; return 1 ;;
-    esac
+  local json="$1" outvar="$2" selected reply candidate old id i
+  local -a available=()
+  mapfile -t available < <(relay_meta_landings_json | jq -r 'keys[]')
+  for i in "${!available[@]}"; do
+    printf '  %s. %s\n' "$((i+1))" "${available[i]}"
+  done
+  if [ "${#available[@]}" -gt 0 ]; then
+    read -r -p "选已有落地编号，回车粘贴新链接，q 返回: " reply || return 1
+    if [[ "$reply" =~ ^[1-9][0-9]*$ ]] && [ "$reply" -le "${#available[@]}" ]; then
+      selected="$(relay_known_landing_json "$json" "${available[reply-1]}")" || return 1
+      printf -v "$outvar" '%s' "$selected"
+      return 0
+    fi
+    [ -z "$reply" ] || return 1
   fi
 
-  relay_prompt_landing_details "$selected_land" selected_ip selected_port selected_username selected_password || return 1
-  candidate="$(relay_landing_to_meta_json "$selected_land" "$selected_ip" "$selected_port" "$selected_username" "$selected_password")" || return 1
+  candidate="$(relay_prompt_connection)" || return 1
+  relay_prompt_landing_id id || return 1
+  old="$(relay_known_landing_json "$json" "$id")"
+  candidate="$(jq --arg id "$id" '.id=$id' <<< "$candidate")" || return 1
+  if relay_landing_matches "$old" "$candidate"; then
+    printf -v "$outvar" '%s' "$old"
+    return 0
+  fi
+  relay_check_new_endpoint "$candidate" || return 1
+  if [ "$old" != null ]; then
+    relay_affected_lines "$json" "$id"
+    ask_confirm_yes "更新这个标识的落地？输入 yes 确认: " || return 1
+  fi
   printf -v "$outvar" '%s' "$candidate"
-  return 0
 }
 
-# ---------- 全部流量中转 ----------
+# Adding an existing entry/landing pair leaves all original authentications intact.
+relay_add_full_config() {
+  local base="$1" entry="$2" landing="$3" id user tag inbound auth outbound
+  id="$(jq -r '.id' <<< "$landing")" || return 1
+  user="$(relay_user_name "$entry" "$id")"; tag="$(relay_outbound_tag "$entry" "$id")"
+  inbound="$(find_inbound_by_entry_key "$base" "$entry")" || return 1
+  [ -n "$inbound" ] || return 1
+  auth="$(find_user_obj_in_inbound "$inbound" "$user")"
+  if [ -n "$auth" ]; then
+    printf '%s\n' "$base"
+    return
+  fi
+  auth="$(build_user_object_from_inbound "$inbound" "$user")" || return 1
+  outbound="$(relay_probe_config "$landing" false | jq -c --arg tag "$tag" '.outbounds[0] | .tag=$tag')" || return 1
+  jq --arg entry "$entry" --arg user "$user" --arg tag "$tag" --argjson auth "$auth" --argjson outbound "$outbound" '
+    (.inbounds[] | select(.tag == $entry)).users |= ((. // []) + [$auth])
+    | .outbounds = ((.outbounds // []) | map(select(.tag != $tag)) + [$outbound])
+    | .route.rules += [{auth_user:[$user],outbound:$tag}]
+  ' <<< "$base"
+}
+
+relay_commit_projection() {
+  local previous_config="$1" previous_meta="$2" next_config="$3" next_meta="$4" projected
+  if [ "$(jq -Sc . <<< "$previous_meta")" = "$(jq -Sc . <<< "$next_meta")" ] &&
+    [ "$(jq -Sc . <<< "$previous_config")" = "$(jq -Sc . <<< "$next_config")" ]; then return 0; fi
+  projected="$(relay_project_partial_state_with_meta "$next_config" "$next_meta")" || return 1
+  with_manager_lock protocol_commit_changes "$previous_config" "$previous_meta" "$projected" "$next_meta"
+}
 
 relay_add() {
   init_manager_env || { pause; return 0; }
-  local json lines=() entry_key choice land ip relay_port username password relay_user out_tag inbound landing_json
-  json="$(config_load)"
-
+  local json lines=() entry choice i tag proto port landing previous meta next relay_json
+  json="$(user_manager_config_for_edit)" || return 1
+  previous="$(meta_load)" || return 1
   mapfile -t lines < <(protocol_entry_inventory "$json" | sort_tsv_by_protocol 1 | head -100)
-  if [ ${#lines[@]} -eq 0 ]; then
-    err "当前没有任何入站协议，请先在协议管理里安装协议。"
-    pause
-    return 1
-  fi
-
-  clear
-  echo -e "${C}--- 添加/覆盖全部流量中转 ---${NC}"
-  echo -e "${C}请选择入站协议：${NC}"
-  local i=1 tag proto port
-  for line in "${lines[@]}"; do
-    IFS=$'\x01' read -r tag proto port <<< "$line"
-    echo -e "  [$i] ${G}${tag}${NC}"
-    i=$((i+1))
-  done
-  echo ""
-  echo -e "${C}当前已配置全部流量中转：${NC}"
-  if ! show_managed_relay_lines "$json"; then
-    echo -e "  ${Y}当前没有全部流量中转。${NC}"
-  fi
-  read -r -p "请选择编号（回车返回上一级）: " choice
-  if [ -z "${choice:-}" ]; then
-    return 0
-  fi
-  if ! [[ "${choice:-}" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#lines[@]}" ]; then
-    warn "无效选择，已返回上一级。"
-    pause
-    return 0
-  fi
-  IFS=$'\x01' read -r entry_key _ _ <<< "${lines[$((choice-1))]}"
-  inbound="$(find_inbound_by_entry_key "$json" "$entry_key")"
-
-  relay_choose_landing_or_return "$json" landing_json || { pause; return 0; }
-  IFS=$'\x01' read -r land ip relay_port username password < <(
-    echo "$landing_json" | jq -r '[.id, .server, ((.port // 0) | tostring), (.username // ""), (.password // "")] | join("\u0001")'
-  )
-
-  relay_user="$(relay_user_name "$entry_key" "$land")"
-  out_tag="$(relay_outbound_tag "$entry_key" "$land")"
-
-  local new_user new_out updated_json meta_json relay_json
-  new_user="$(build_user_object_from_inbound "$inbound" "$relay_user")" || {
-    err "不支持的入站协议，无法生成中转用户。"
-    pause
-    return 1
-  }
-  new_out="$(relay_socks_outbound_json "$out_tag" "$ip" "$relay_port" "$username" "$password")"
-
-  updated_json="$(echo "$json" | jq "${JQ_AUTH_USERS}"'
-    .inbounds |= map(
-      if .tag == $ek then
-        .users = (((.users // []) | map(select((.name // .username // "") != $ru))) + [$nu])
-      else
-        if .users? then .users |= map(select((.name // .username // "") != $ru)) else . end
-      end
-    )
-    | .outbounds = (
-        ((.outbounds // []) | map(
-          if (.tag // "") == $ot then $no else . end
-        ))
-        | if any(.[]?; (.tag // "") == $ot) then . else . + [$no] end
-      )
-    | .route.rules = (
-        ((.route.rules // [])
-          | map(select(((auth_users_array | index($ru)) == null) and ((.outbound // "") != $ot)))
-        )
-        + [{auth_user:[$ru], outbound:$ot}]
-      )
-  ' --arg ek "$entry_key" --arg ru "$relay_user" --arg ot "$out_tag" --argjson nu "$new_user" --argjson no "$new_out")"
-  relay_json="$(relay_meta_upsert_landing_to_json "$(relay_meta_json)" "$landing_json")" || return 1
-  meta_json="$(relay_meta_replace_in_meta_json "$(meta_load)" "$relay_json")" || return 1
-  updated_json="$(relay_project_partial_state_with_meta "$updated_json" "$meta_json")" || {
-    err "重建路由失败，已中止，未写入配置。"
-    pause
-    return 1
-  }
-  local _relay_ok=0
-  if user_db_exists; then
-    local db_json
-    sync_user_usage_counters || true
-    db_json="$(user_db_load)"
-    db_json="$(user_db_on_node_added "$db_json" "$relay_user")"
-    if _USER_KEEP_LATEST_DB=1 _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$updated_json" "$meta_json"; then
-      _relay_ok=1
-    fi
+  if [ "${#lines[@]}" -eq 0 ]; then warn "请先安装一个本机入站节点。"; pause; return 0; fi
+  if [ "${#lines[@]}" -eq 1 ]; then
+    choice=1
   else
-    if _CONFIG_APPLY_QUIET_OK=1 config_and_meta_apply "$updated_json" "$meta_json"; then
-      _relay_ok=1
-    fi
+    for i in "${!lines[@]}"; do
+      IFS=$'\x01' read -r tag proto port <<< "${lines[i]}"
+      printf '  %s. %s\n' "$((i+1))" "$tag"
+    done
+    read -r -p "选择客户端连接的本机节点（回车返回）: " choice || return 0
+    [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -le "${#lines[@]}" ] || return 0
   fi
-  if [ "$_relay_ok" -eq 1 ]; then
-    ok "全部流量中转已添加：${relay_user}（落地 SOCKS: ${ip}:${relay_port}）"
-  else
-    warn "全部流量中转添加失败，已返回上一级。"
-  fi
+  IFS=$'\x01' read -r entry _ _ <<< "${lines[choice-1]}"
+  relay_choose_landing_or_return "$json" landing || return 0
+  next="$(relay_add_full_config "$json" "$entry" "$landing")" || return 1
+  relay_json="$(relay_meta_json_from_meta "$previous")" || return 1
+  relay_json="$(relay_meta_upsert_landing_to_json "$relay_json" "$landing")" || return 1
+  meta="$(relay_meta_replace_in_meta_json "$previous" "$relay_json")" || return 1
+  relay_commit_projection "$json" "$previous" "$next" "$meta" || return 1
+  ok "中转已保存。已有客户端连接凭据已保留。"
   pause
-  return 0
 }
 
 # ---------- 部分流量中转元数据 ----------
@@ -572,9 +518,18 @@ relay_config_project_json() {
   echo "$json" | jq \
     --argjson rules "$rules_json" \
     --argjson landings "$landings_json" '
-    def socks_out($tag; $landing):
-      ({type:"socks", tag:$tag, server:($landing.server // ""), server_port:(($landing.port // 0) | tonumber)}
-      | if (($landing.username // "") != "") then . + {username:$landing.username, password:($landing.password // "")} else . end);
+    def socks_out($base; $tag; $landing):
+      ($base | del(.username,.password,.udp_over_tcp)) +
+      ({type:"socks", version:"5", tag:$tag, server:($landing.server // ""), server_port:(($landing.port // 0) | tonumber)}
+      | if (($landing.username // "") != "") then . + {username:$landing.username, password:($landing.password // "")} else . end
+      | if $landing.udp_over_tcp == true then . + {udp_over_tcp:true} else . end);
+    def full_landing:
+      . as $tag |
+      if startswith("to-") then sub("^to-"; "")
+      elif startswith("out-to-") then sub("^out-to-"; "")
+      elif test("^out-.+-to-.+$") then
+        ($landings | keys | map(. as $id | select($tag | endswith("-to-" + $id))) | max_by(length)) // ""
+      else "" end;
     def rule_set_array:
       ((.rule_set // []) | if type == "array" then . else [.] end);
     ($rules | map(.tag // "") | unique) as $managed_tags
@@ -603,15 +558,16 @@ relay_config_project_json() {
         ((.outbounds // [])
           | map(
               (.tag // "") as $tag
-              | if ($tag | startswith("to-")) and (($landings[($tag | sub("^to-"; ""))] // null) != null) then
-                  socks_out($tag; $landings[($tag | sub("^to-"; ""))])
+              | ($tag | full_landing) as $id
+              | if .type == "socks" and $id != "" and $landings[$id] != null then
+                  socks_out(.; $tag; $landings[$id])
                 else .
                 end
             )
           | map(select(((.tag // "") != "relay-partial") and (((.tag // "") | startswith("relay-")) | not)))
         )
         + (if ($used_landings | length) > 0 then
-            ($used_landings | map(. as $landing_id | socks_out(("relay-" + $landing_id); $landings[$landing_id])))
+            ($used_landings | map(. as $landing_id | socks_out({}; ("relay-" + $landing_id); $landings[$landing_id])))
           else [] end)
       )
   '
@@ -635,9 +591,13 @@ relay_apply_meta_json_state() {
   local meta_json="$1" json projected normalized_relay
   normalized_relay="$(relay_meta_json_from_meta "$meta_json")" || return 1
   meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$normalized_relay")" || return 1
-  json="$(config_load)"
+  json="$(user_manager_config_for_edit)" || return 1
   projected="$(relay_project_partial_state_with_meta "$json" "$meta_json")" || return 1
-  _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_and_meta_apply "$projected" "$meta_json"
+  if user_db_exists; then
+    _USER_KEEP_LATEST_DB=1 _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes '' "$projected" "$meta_json"
+  else
+    _CONFIG_APPLY_QUIET_OK=1 _CONFIG_SKIP_USAGE_SYNC=1 config_and_meta_apply "$projected" "$meta_json"
+  fi
 }
 
 relay_apply_partial_state() {
@@ -647,8 +607,10 @@ relay_apply_partial_state() {
 relay_add_preset_rules() {
   local raw="$1" picks=() names=() files=() pick preset item name file landing_json json files_json has_warp_conflict=0
   local meta_json relay_json warp_json
+  local previous
   init_manager_env || return 1
-  json="$(config_load)"
+  json="$(user_manager_config_for_edit)" || return 1
+  previous="$(meta_load)" || return 1
   mapfile -t picks < <(parse_plus_selections "$raw")
   [ "${#picks[@]}" -gt 0 ] || return 1
   for pick in "${picks[@]}"; do
@@ -676,23 +638,25 @@ relay_add_preset_rules() {
     }
   fi
   relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
-  meta_json="$(meta_load)"
+  meta_json="$previous"
   warp_json="$(warp_rule_remove_meta_by_files_json_from "$(warp_meta_json)" "$files_json")" || return 1
-  relay_json="$(relay_meta_json)"
+  relay_json="$(relay_meta_json_from_meta "$previous")"
   for pick in "${!files[@]}"; do
     relay_json="$(relay_rule_add_meta_to_json "$relay_json" "${names[$pick]}" "${files[$pick]}" "$landing_json")" || return 1
   done
   meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
   meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
-  relay_apply_meta_json_state "$meta_json" || return 1
+  relay_commit_projection "$json" "$previous" "$json" "$meta_json" || return 1
   ok "部分流量中转规则已应用。"
   pause
 }
 
 relay_custom_rule_menu() {
   local raw file name landing_json json files_json has_warp_conflict=0 meta_json relay_json warp_json
+  local previous
   init_manager_env || return 1
-  json="$(config_load)"
+  json="$(user_manager_config_for_edit)" || return 1
+  previous="$(meta_load)" || return 1
   clear
   print_rect_title "自定义网站规则"
   echo "请先在以下页面查找规则名："
@@ -718,12 +682,12 @@ relay_custom_rule_menu() {
     }
   fi
   relay_select_or_prompt_partial_landing "$json" landing_json || { pause; return 0; }
-  meta_json="$(meta_load)"
+  meta_json="$previous"
   warp_json="$(warp_rule_remove_meta_by_files_json_from "$(warp_meta_json)" "$files_json")" || return 1
-  relay_json="$(relay_rule_add_meta_to_json "$(relay_meta_json)" "$name" "$file" "$landing_json")" || return 1
+  relay_json="$(relay_rule_add_meta_to_json "$(relay_meta_json_from_meta "$previous")" "$name" "$file" "$landing_json")" || return 1
   meta_json="$(warp_meta_replace_in_meta_json "$meta_json" "$warp_json")" || return 1
   meta_json="$(relay_meta_replace_in_meta_json "$meta_json" "$relay_json")" || return 1
-  relay_apply_meta_json_state "$meta_json" || return 1
+  relay_commit_projection "$json" "$previous" "$json" "$meta_json" || return 1
   ok "自定义部分流量中转已添加：$file"
   pause
 }
@@ -737,7 +701,7 @@ relay_delete() {
   local partial_changed=0 full_changed=0 has_delete_all=0 tags_json tag final_json meta_json relay_json
   local -a selected_tags=()
 
-  json="$(config_load)"
+  json="$(user_manager_config_for_edit)" || return 1
   mapfile -t lines < <(relay_list_table "$json")
   mapfile -t node_lines < <(
     printf '%s\n' "${lines[@]}" | awk -F '\x01' '
@@ -870,7 +834,7 @@ relay_delete() {
   if user_db_exists; then
     local db_json
     sync_user_usage_counters || true
-    db_json="$(user_db_load)"
+    db_json="$(user_db_load)" || return 1
     db_json="$(user_db_cleanup_missing_nodes "$db_json" "$final_json")"
     if _USER_KEEP_LATEST_DB=1 _USER_MANAGER_APPLY_QUIET_OK=1 user_manager_apply_changes "$db_json" "$final_json" "$meta_json"; then
       _delete_ok=1
@@ -903,8 +867,9 @@ manage_relay_nodes() {
   while true; do
     clear
     local json act count
-    json="$(config_load)"
+    json="$(user_manager_config_for_edit)" || return 1
     print_rect_title "中转管理"
+    say "客户端连接本机，流量从落地机出去。请先在落地机用本脚本安装 SOCKS5，再复制落地链接。"
     echo "当前中转规则："
     while IFS= read -r line; do
       echo "  $line"
@@ -931,12 +896,15 @@ manage_relay_nodes() {
     fi
     echo -e "  ${R}0.${NC} 返回主菜单"
     echo
+    printf "  u. 更新落地连接   t. 中转诊断\n"
     echo "2-7支持用+连接，例如：2+4+7"
     read -r -p "请选择操作: " act
     case "${act:-}" in
       1) relay_add || true ;;
       8) relay_custom_rule_menu || true ;;
       9) relay_delete || true ;;
+      u|U) relay_update_landing_menu || true ;;
+      t|T) relay_diagnostics_menu || true ;;
       0|q|Q|"") return 0 ;;
       *+*|[2-7]) relay_add_preset_rules "$act" || true ;;
       *) warn "无效输入：$act"; sleep 1 ;;
